@@ -6,6 +6,8 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
     alias(libs.plugins.secrets)
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21"
+
 }
 
 
@@ -95,17 +97,19 @@ dependencies {
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
     // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation(libs.kotlinx.coroutines.android)
     // ViewModel Compose
     implementation(libs.androidx.lifecycle.viewmodel.compose)
-
+    implementation("androidx.navigation:navigation-compose:2.8.0-alpha08") // or newer
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
     // Coil for image loading
     implementation(libs.coil.compose)
     // Room Database
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx) // For Kotlin extensions and Coroutines support
     ksp(libs.androidx.room.compiler) // KSP for annotation processing
-
+    implementation("androidx.compose.material:material-icons-extended")
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
@@ -114,11 +118,4 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.room.testing) // For Room testing
 
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-    debugImplementation(libs.androidx.compose.ui.tooling)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

@@ -3,6 +3,8 @@ package com.gobex.smartreadingassistant.core.di
 import android.util.Log
 import com.gobex.smartreadingassistant.core.util.Constants
 import com.gobex.smartreadingassistant.feature.conversation.data.LLMApiService
+import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -50,5 +52,13 @@ object NetworkModule{
     fun provideLLMApiService(retrofit : Retrofit) : LLMApiService
     {
         return retrofit.create(LLMApiService::class.java)
+    }
+
+    @Provides
+    @Singleton
+    fun provideGson(): Gson {
+        return GsonBuilder()
+            .setLenient() // Optional: Helps with loose JSON from some APIs
+            .create()
     }
 }
