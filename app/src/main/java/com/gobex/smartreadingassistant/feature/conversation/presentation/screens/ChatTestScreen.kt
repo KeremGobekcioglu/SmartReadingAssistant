@@ -33,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.material.icons.filled.Delete
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,6 +69,10 @@ fun ChatTestScreen(
             TopAppBar(
                 title = { Text("Gemini Test Console") },
                 actions = {
+                    // Clear Chat Button
+                    IconButton(onClick = { viewModel.clearConversation() }) {
+                        Icon(Icons.Default.Delete, "Clear Chat")
+                    }
                     // Navigate to DB Page
                     IconButton(onClick = onNavigateToHistory) {
                         Icon(Icons.Default.History, "Debug DB")

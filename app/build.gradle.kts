@@ -95,7 +95,10 @@ dependencies {
     implementation(libs.converter.gson)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
-
+// Core Nordic BLE Library
+    implementation("no.nordicsemi.android:ble:2.7.1")
+// KTX version for Coroutines (this is what makes it clean)
+    implementation("no.nordicsemi.android:ble-ktx:2.7.1")
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)
     // ViewModel Compose
@@ -117,5 +120,5 @@ dependencies {
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.room.testing) // For Room testing
-
+    implementation(libs.logging.interceptor.v4110)
 }

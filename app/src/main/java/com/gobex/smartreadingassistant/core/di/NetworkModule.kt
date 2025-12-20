@@ -10,6 +10,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
@@ -23,16 +24,32 @@ object NetworkModule{
     @Provides
     @Singleton
     fun provideOkHttpClient(): OkHttpClient {
+//        val loggingInterceptor = HttpLoggingInterceptor { message ->
+//            Log.d("OkHttp", message)
+//        }.apply {
+//            level = HttpLoggingInterceptor.Level.BODY
+//        }
+
         return OkHttpClient.Builder()
+            .readTimeout(0, TimeUnit.MILLISECONDS) // Disable read timeout for streaming
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(5, TimeUnit.MINUTES) // Max time for entire request
             .writeTimeout(30, TimeUnit.SECONDS)
-            .addInterceptor { chain ->
-                // Logging interceptor (optional)
-                val request = chain.request()
-//                Log.d("API", "Request: ${request.url}")
-                chain.proceed(request)
-            }
+//            .addInterceptor(loggingInterceptor)
+//            .addInterceptor { chain ->
+//                val request = chain.request()
+//                Log.d("NetworkRequest", "URL: ${request.url}")
+//                Log.d("NetworkRequest", "Method: ${request.method}")
+//                Log.d("NetworkRequest", "Headers: ${request.headers}")
+//                val response = chain.proceed(request)
+//                Log.d("NetworkResponse", "Code: ${response.code}")
+//                Log.d("NetworkResponse", "Message: ${response.message}")
+//                response
+//            }
+            .addInterceptor(HttpLoggingInterceptor().apply {
+                level = HttpLoggingInterceptor.Level.HEADERS // ✅ Don't log body for streaming
+            })
+            .cache(null)
             .build()
     }
 

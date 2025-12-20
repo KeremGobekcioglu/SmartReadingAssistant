@@ -5,8 +5,7 @@ import androidx.room.PrimaryKey
 
 @Entity(tableName = "conversation_history")
 data class MessageEntity(
-    @PrimaryKey(autoGenerate = true)
-    val id: Int = 0,
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val role: String, // Stored as String, mapped from MessageRole
     val text: String,
     val imageBase64: String? = null,

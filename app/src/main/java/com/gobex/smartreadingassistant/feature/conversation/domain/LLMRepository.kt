@@ -5,13 +5,13 @@ import kotlin.io.encoding.Base64
 
 interface LLMRepository {
 
-    fun sendMessage(message : String , modelId: String = "gemini-1.5-flash", imageBase64: String? , conversationHistory: List<Message>) : Result<Message>
+    fun sendMessage(message : String , modelId: String = "models/gemini-1.5-flash", imageBase64: String? , conversationHistory: List<Message>) : Result<Message>
 
     // Get conversation history
     suspend fun getConversationHistory(): List<Message>
     suspend fun streamMessage(
         message: String,
-        modelId: String = "gemini-1.5-flash", // Default
+        modelId: String = "gemini-2.5-flash", // Default
         imageBase64: String? = null,
         conversationHistory: List<Message>
     ): Flow<StreamResult>

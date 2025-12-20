@@ -28,7 +28,16 @@ data class InlineDataDto(
 )
 
 data class UsageMetadataDto(
-    @SerializedName("totalTokenCount") val totalTokenCount: Int
+    @SerializedName("promptTokenCount") val promptTokenCount: Int? = null,
+    @SerializedName("candidatesTokenCount") val candidatesTokenCount: Int? = null,
+    @SerializedName("totalTokenCount") val totalTokenCount: Int,
+    @SerializedName("thoughtsTokenCount") val thoughtsTokenCount: Int? = null,
+    @SerializedName("promptTokensDetails") val promptTokensDetails: List<TokenDetailDto>? = null
+)
+
+data class TokenDetailDto(
+    @SerializedName("modality") val modality: String,
+    @SerializedName("tokenCount") val tokenCount: Int
 )
 
 data class FileUploadResponse(
@@ -45,9 +54,16 @@ data class UploadedFileResponseDto(
     @SerializedName("uri") val uri: String,
     @SerializedName("name") val name: String,
     @SerializedName("mimeType") val mimeType: String,
-    // (There might be other fields like displayName, expirationTime, etc.)
+    @SerializedName("displayName") val displayName: String? = null,
+    @SerializedName("sizeBytes") val sizeBytes: String? = null,
+    @SerializedName("createTime") val createTime: String? = null,
+    @SerializedName("expirationTime") val expirationTime: String? = null, // ✅ Important!
+    @SerializedName("state") val state: String? = null,
+    @SerializedName("sha256Hash") val sha256Hash: String? = null
 )
 data class FileDataRequestDto(
     @SerializedName("mimeType") val mimeType: String,
     @SerializedName("fileUri") val fileUri: String // Use fileUri for the request
 )
+
+

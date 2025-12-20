@@ -9,7 +9,8 @@ fun MessageEntity.toDomain(): Message {
         text = this.text,
         imageBase64 = this.imageBase64,
         fileUri = this.fileUri,
-        timestamp = this.timestamp
+        timestamp = this.timestamp,
+        totalTokenCount = this.totalTokenCount
     )
 }
 
@@ -19,6 +20,7 @@ fun Message.toEntity(): MessageEntity {
         text = this.text,
         imageBase64 = this.imageBase64,
         fileUri = this.fileUri,
-        timestamp = this.timestamp
+        timestamp = this.timestamp,
+        totalTokenCount = this.totalTokenCount
     )
 }

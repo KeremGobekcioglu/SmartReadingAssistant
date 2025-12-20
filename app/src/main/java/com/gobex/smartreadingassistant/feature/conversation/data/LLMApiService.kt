@@ -31,6 +31,7 @@ interface LLMApiService {
     suspend fun streamGenerateContent(
         @Path("model") model: String,
         @Query("key") apiKey: String,
+        @Query("alt") alt: String = "sse",
         @Body request: GeminiRequestDto
     ): ResponseBody
 
@@ -39,6 +40,8 @@ interface LLMApiService {
     @POST("upload/v1beta/files")
     suspend fun uploadFile(
         @Query("key") apiKey: String,
+        @Query("uploadType") uploadType: String = "multipart", // ✅ Required parameter
+        @Part metadata: MultipartBody.Part,
         @Part file: MultipartBody.Part
     ): FileUploadResponse
 }

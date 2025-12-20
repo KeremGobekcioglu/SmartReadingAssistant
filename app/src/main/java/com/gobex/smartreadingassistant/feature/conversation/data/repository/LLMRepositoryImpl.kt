@@ -18,8 +18,11 @@ import com.gobex.smartreadingassistant.feature.conversation.domain.StreamResult
 import com.gobex.smartreadingassistant.feature.conversation.domain.UsageMetadata
 import com.gobex.smartreadingassistant.feature.conversation.domain.toDomain
 import com.google.gson.Gson
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import okhttp3.Dispatcher
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
@@ -61,11 +64,26 @@ class LLMRepositoryImpl @Inject constructor(
             )
             localDb.addMessage(userMessage)
             var currentFileUri : String? = null
+
+            val existingMessage = conversationHistory.lastOrNull {
+                it.imageBase64 == imageBase64 && it.fileUri != null
+            }
             // if we have an media to upload , i have to check it. also we need its uri so that we dont resend.
-            if(imageBase64 != null)
-            {
+            if (existingMessage != null) {
+                // Reuse existing URI
+                currentFileUri = existingMessage.fileUri
+                Log.d("LLMREPOSITORYIMPL", "Reusing existing URI: $currentFileUri")
+            } else if (imageBase64 != null) {
+                // Upload new image
                 val imageBytes = android.util.Base64.decode(imageBase64, android.util.Base64.DEFAULT)
                 currentFileUri = uploadImageToGemini(imageBytes)
+
+                // ✅ Update the message with the URI
+                if (currentFileUri != null) {
+                    val updatedMessage = userMessage.copy(fileUri = currentFileUri)
+//                    localDb.updateMessage(updatedMessage)
+                }
+                Log.d("LLMREPOSITORYIMPL", "Image uploaded. URI: $currentFileUri")
             }
             // B: Now our coversation will be turn to our dtos to upload.
             val contents = conversationHistory.map {
@@ -74,12 +92,14 @@ class LLMRepositoryImpl @Inject constructor(
 
             val currentParts = mutableListOf<PartDto>()
             // if we uplaod image ..
+            // Add image ONLY if upload succeeded
             if (currentFileUri != null) {
+                Log.d("LLMREPOSITORYIMPL", "Using uploaded file URI: $currentFileUri")
                 currentParts.add(PartDto(fileData = FileDataRequestDto("image/jpeg", currentFileUri)))
             }
-            // If upload fails , we get the iamge base 64.
-            else if(imageBase64 != null)
-            {
+            // Fallback to Base64 only if upload failed AND Base64 is available
+            else if(imageBase64 != null) {
+                Log.d("LLMREPOSITORYIMPL", "Upload failed, using Base64 fallback")
                 currentParts.add(PartDto(inlineData = InlineDataDto("image/jpeg", imageBase64)))
             }
             currentParts.add(PartDto(text = message))
@@ -96,52 +116,59 @@ class LLMRepositoryImpl @Inject constructor(
             val fullResponse = StringBuilder()
             var usageMetadata : UsageMetadataDto? = null
             // Im opening the stream here
-            responseBody.source().use {
-                source ->
-                source.inputStream().bufferedReader().use {
-                    reader ->
-                    var line = reader.readLine()
-                    while(line != null)
-                    {
-                        // Phase 3 : parsing
+// ✅ FIXED: Unbuffered streaming
+            responseBody.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
+                try {
+                    while (true) {
+                        val line = reader.readLine() ?: break // null = end of stream
+                        val trimmed = line.trim()
 
-                        val cleanedLine = cleanLine(line)
-                        if(cleanedLine.isNotBlank())
-                        {
-                            try {
-                                val chunk = gson.fromJson(cleanedLine, GeminiResponseDto::class.java)
-                                val textChunk = chunk.candidates?.firstOrNull()
-                                    ?.content?.parts?.firstOrNull()?.text
+                        Log.d("LLMREPOSITORYIMPL", "🔍 Raw line: $trimmed") // Debug log
 
-                                // Text being received is sent to UI immediately
-                                if(textChunk != null)
-                                {
-                                    fullResponse.append(textChunk)
-                                    emit(StreamResult.Chunk(textChunk))
+                        if (trimmed.startsWith("data: ")) {
+                            val jsonData = trimmed.substring(6)
+
+                            if (jsonData.isNotBlank() && jsonData != "[DONE]") {
+                                try {
+                                    Log.d("LLMREPOSITORYIMPL", "⏱️ Parsing at ${System.currentTimeMillis()}")
+
+                                    val chunk = gson.fromJson(jsonData, GeminiResponseDto::class.java)
+                                    val textChunk = chunk.candidates?.firstOrNull()
+                                        ?.content?.parts?.firstOrNull()?.text
+
+                                    if (textChunk != null) {
+                                        Log.d("LLMREPOSITORYIMPL", "📤 Emitting: '$textChunk'")
+                                        fullResponse.append(textChunk)
+
+                                        // 🔥 Emit immediately - don't wait!
+                                        emit(StreamResult.Chunk(textChunk))
+
+                                        Log.d("LLMREPOSITORYIMPL", "✅ Emitted at ${System.currentTimeMillis()}")
+                                    }
+
+                                    if (chunk.usageMetadata != null) {
+                                        usageMetadata = chunk.usageMetadata
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("LLMREPOSITORYIMPL", "❌ Parse error: ${e.message}")
                                 }
-                                // If there is a ısage meta data , it is saved.
-                                if (chunk.usageMetadata != null) {
-                                    usageMetadata = chunk.usageMetadata
-                                }
-                            }
-                            catch (e : Exception)
-                            {
-                                Log.d("LLMREPOSITORYIMPLGENERATESTREAM" , "${e.message}}")
                             }
                         }
-
-                        line = reader.readLine()
                     }
-                    // PHASE 4 : Finish
+                } catch (e: Exception) {
+                    Log.e("LLMREPOSITORYIMPL", "❌ Stream error: ${e.message}")
+                    throw e
                 }
             }
             val domainMetadata = usageMetadata?.toDomain()
+            Log.d("LLMREPOSITORYIMPL", "✅ Domain metadata: $domainMetadata")
             val fullMessage = Message(
                 role = MessageRole.ASSISTANT,
                 text = fullResponse.toString(),
                 timestamp = System.currentTimeMillis(),
                 totalTokenCount = domainMetadata?.totalTokenCount
             )
+            Log.d("LLMREPOSITORYIMPL", "✅ Full message created with tokens: ${fullMessage.totalTokenCount}")
             localDb.addMessage(fullMessage)
 
             emit(StreamResult.Complete(fullMessage = fullMessage, metadata = domainMetadata))
@@ -151,7 +178,7 @@ class LLMRepositoryImpl @Inject constructor(
             emit(StreamResult.Error(e))
             Log.d("LLMREPOSITORYIMPL" , "STREAM MESSAGE CATCH BLOCK")
         }
-    }
+    }.flowOn(Dispatchers.IO)
 
     override suspend fun clearConversation() {
         localDb.clearHistory()
@@ -166,16 +193,35 @@ class LLMRepositoryImpl @Inject constructor(
     }
     private suspend fun uploadImageToGemini(imageBytes: ByteArray): String? {
         return try {
-            // Create RequestBody
-            val requestFile = RequestBody.create("image/jpeg".toMediaTypeOrNull(), imageBytes)
-            val body = MultipartBody.Part.createFormData("file", "upload.jpg", requestFile)
+            // Create RequestBody with proper metadata
+            val displayName = "image_${System.currentTimeMillis()}.jpg"
 
-            val response = apiService.uploadFile(Constants.API_KEY, body)
+            // Create metadata part
+            val metadata = """{"file": {"displayName": "$displayName"}}"""
+            val metadataBody = RequestBody.create("application/json".toMediaTypeOrNull(), metadata)
+            val metadataPart = MultipartBody.Part.createFormData("metadata", null, metadataBody)
+
+            // Create file part
+            val fileBody = RequestBody.create("image/jpeg".toMediaTypeOrNull(), imageBytes)
+            val filePart = MultipartBody.Part.createFormData("file", "upload.jpg", fileBody)
+
+            // Upload with multipart
+            val response = apiService.uploadFile(
+                apiKey = Constants.API_KEY,
+                uploadType = "multipart", // ✅ ADD THIS
+                metadata = metadataPart,
+                file = filePart
+            )
+
+            Log.d("LLMREPOSITORYIMPL", "Upload success: ${response.file.uri}")
+            Log.d("LLMREPOSITORYIMPL", "Expires: ${response.file.expirationTime}")
+
             response.file.uri
+
         } catch (e: Exception) {
-            Log.d("LLMREPOSITORYIMPL", "{${e.message}}")
+            Log.e("LLMREPOSITORYIMPL", "Upload failed: ${e.message}", e)
             e.printStackTrace()
-            null // Fallback to Base64 if upload fails
+            null
         }
     }
     // purpose is to clean ][
