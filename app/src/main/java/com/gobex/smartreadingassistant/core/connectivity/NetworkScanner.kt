@@ -45,7 +45,8 @@ class NetworkScanner @Inject constructor(
         return try {
             val socket = Socket()
             // Very fast timeout (50ms) is enough for local hotspot
-            socket.connect(InetSocketAddress(ip, port), 50)
+            // THIS COULD  BE DANGEROUS
+            socket.connect(InetSocketAddress(ip, port), 100)
             socket.close()
             Log.d("Scanner", "DEVICE FOUND AT $ip")
             true

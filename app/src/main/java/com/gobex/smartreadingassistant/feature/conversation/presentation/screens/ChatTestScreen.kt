@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.*
@@ -34,6 +35,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,6 +55,7 @@ fun ChatTestScreen(
             when (effect) {
                 is ConversationEffect.ShowError -> Toast.makeText(context, "Error: ${effect.message}", Toast.LENGTH_LONG).show()
                 is ConversationEffect.SpeakText -> Toast.makeText(context, "TTS: ${effect.text.take(50)}...", Toast.LENGTH_SHORT).show()
+                is ConversationEffect.NavigateToChat -> Toast.makeText(context, "NP" , Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -69,11 +73,19 @@ fun ChatTestScreen(
             TopAppBar(
                 title = { Text("Gemini Test Console") },
                 actions = {
-                    // Clear Chat Button
+                    // --- FLASH TOGGLE BUTTON ---
+                    val isFlashOn = uiState.isFlashOn // Assuming you add this to your UiState
+                    IconButton(onClick = { viewModel.toggleFlash(!isFlashOn) }) {
+                        Icon(
+                            imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                            contentDescription = "Toggle Flash",
+                            tint = if (isFlashOn) Color.Yellow else LocalContentColor.current
+                        )
+                    }
+
                     IconButton(onClick = { viewModel.clearConversation() }) {
                         Icon(Icons.Default.Delete, "Clear Chat")
                     }
-                    // Navigate to DB Page
                     IconButton(onClick = onNavigateToHistory) {
                         Icon(Icons.Default.History, "Debug DB")
                     }
@@ -96,7 +108,8 @@ fun ChatTestScreen(
                             viewModel.sendPrompt(text, base64)
                         }
                     }
-                }
+                },
+                onCapturePhoto = { viewModel.captureAndAnalyze() } // New Callback
             )
         }
     ) { padding ->
@@ -125,7 +138,8 @@ fun ChatTestScreen(
 @Composable
 fun DeveloperInputBar(
     isStreaming: Boolean,
-    onSend: (String, Uri?) -> Unit
+    onSend: (String, Uri?) -> Unit,
+    onCapturePhoto: () -> Unit
 ) {
     var text by remember { mutableStateOf("") }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
@@ -154,7 +168,13 @@ fun DeveloperInputBar(
             IconButton(onClick = { launcher.launch("image/*") }) {
                 Icon(Icons.Default.AddPhotoAlternate, "Upload")
             }
-
+            // --- CAPTURE PHOTO BUTTON (ESP32 TRIGGER) ---
+            IconButton(
+                onClick = onCapturePhoto,
+                enabled = !isStreaming
+            ) {
+                Icon(Icons.Default.CameraAlt, "Capture from Glasses", tint = MaterialTheme.colorScheme.primary)
+            }
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },

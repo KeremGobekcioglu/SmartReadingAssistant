@@ -6,5 +6,6 @@ data class ConversionState(
     val messages : List<Message> = emptyList(),
     val isStreaming : Boolean = false,
     val isLoadingHistory : Boolean = false,
-    val currentText : String = "" // tempt text for ai s response.
+    val currentText : String = "", // tempt text for ai s response.
+    val isFlashOn: Boolean = false
 )

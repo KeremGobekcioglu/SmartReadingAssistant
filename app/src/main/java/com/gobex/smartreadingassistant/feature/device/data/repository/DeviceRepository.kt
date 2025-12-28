@@ -31,19 +31,40 @@ class DeviceRepository @Inject constructor() {
         currentIP = ipAddress
     }
 
-    suspend fun captureImage() : Result<ByteArray>
-    {
+    suspend fun captureImage(): Result<ByteArray> {
         val service = apiService ?: return Result.failure(Exception("Exception: Cant connect to esp server."))
+
         return try {
-            service.controlDevice("flash",1)
+            // 1. Turn Flash ON
+            // service.controlDevice("flash", 1)
+
+            // 2. Capture
             val response = service.captureImage()
-            service.controlDevice("flash",0)
-            if( response.isSuccessful && response.body() != null ) Result.success(response.body()!!.bytes())
-            else Result.failure(Exception("Capture failed : ${response.code()}"))
-        }
-        catch (e : Exception)
-        {
+
+            if (response.isSuccessful && response.body() != null) {
+                Result.success(response.body()!!.bytes())
+            } else {
+                Result.failure(Exception("Capture failed : ${response.code()}"))
+            }
+        } catch (e: Exception) {
             Result.failure(e)
+        } finally {
+            // 3. GUAaRANTEE Flash OFF (Even if capture crashes)
+            try {
+                service.controlDevice("flash", 0)
+            } catch (e: Exception) {
+                // Ignore errors here, we just want to try turning it off
+            }
+        }
+    }
+
+    suspend fun toggleFlash(isOn: Boolean) {
+        val service = apiService ?: return
+        try {
+            val value = if (isOn) 1 else 0
+            service.controlDevice("flash", value)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }

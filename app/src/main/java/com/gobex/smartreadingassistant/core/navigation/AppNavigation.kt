@@ -2,6 +2,8 @@ package com.gobex.smartreadingassistant.core.navigation
 import kotlinx.serialization.Serializable
 
 sealed interface Route {
+    @Serializable
+    data object Connect : Route
     // The Main Chat Interface (Test Playground)
     @Serializable
     data object Chat : Route

@@ -5,4 +5,6 @@ sealed class ConversationEffect
 {
     data class ShowError(val message: String?) : ConversationEffect()
     data class SpeakText(val text: String) : ConversationEffect()
+
+    data object NavigateToChat : ConversationEffect()
 }

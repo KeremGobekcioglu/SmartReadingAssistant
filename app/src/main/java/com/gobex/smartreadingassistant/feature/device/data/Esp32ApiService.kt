@@ -7,11 +7,11 @@ import retrofit2.http.Query
 
 interface Esp32ApiService {
 
-    @GET("/capture")
+    @GET("capture")
     suspend fun captureImage(): Response<ResponseBody>
 
     // Usage: ?var=flash&val=1
-    @GET("/control")
+    @GET("control")
     suspend fun controlDevice(
         @Query("var") variable: String,
         @Query("val") value: Int

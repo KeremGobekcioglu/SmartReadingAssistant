@@ -3,8 +3,11 @@ package com.gobex.smartreadingassistant.core.connectivity
 import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.ParcelUuid
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
@@ -12,6 +15,7 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import no.nordicsemi.android.ble.ktx.suspend
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,20 +32,27 @@ class BleConnectionManager @Inject constructor(
     @SuppressLint("MissingPermission")
     fun startConnectionSequence(ssid: String, pass: String) {
         val scanner = adapter?.bluetoothLeScanner
-        if (scanner == null) {
-            Log.e("BLE", "Bluetooth unavailable")
-            return
-        }
+        if (scanner == null) return
 
-        scanner.startScan(object : ScanCallback() {
+        // 1. Create a Filter for your specific Service UUID
+        val serviceUuid = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+        val filter = ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(serviceUuid))
+            .build()
+
+        // 2. Configure Settings for Low Latency (Fast discovery)
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+
+        scanner.startScan(listOf(filter), settings, object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 val device = result?.device ?: return
-                // Check name safely (name can be null)
-                if (device.name == "SmartGlasses") {
-                    Log.d("BLE", "Device Found: ${device.address}")
-                    scanner.stopScan(this)
-                    performHandshake(device, ssid, pass)
-                }
+
+                // No need to check name anymore, the filter guarantees it's your ESP32
+                Log.d("BLE", "ESP32 Found: ${device.address}")
+                scanner.stopScan(this)
+                performHandshake(device, ssid, pass)
             }
 
             override fun onScanFailed(errorCode: Int) {
@@ -49,7 +60,6 @@ class BleConnectionManager @Inject constructor(
             }
         })
     }
-
     private fun performHandshake(device: BluetoothDevice, ssid: String, pass: String) {
         CoroutineScope(Dispatchers.IO).launch {
             try {

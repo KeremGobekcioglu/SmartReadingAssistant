@@ -71,6 +71,8 @@ secrets {
 //    defaultPropertiesFileName = "local.defaults.properties"
 }
 dependencies {
+    implementation("com.google.accompanist:accompanist-permissions:0.34.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)

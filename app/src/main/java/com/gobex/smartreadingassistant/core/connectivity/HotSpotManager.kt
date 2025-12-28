@@ -26,7 +26,6 @@ class HotspotManager @Inject constructor(
     private val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private var currentReservation: LocalOnlyHotspotReservation? = null
 
-    @RequiresApi(Build.VERSION_CODES.O)
     fun startHotspot(): Flow<HotspotCredentials> = callbackFlow {
 
         // We need NEARBY_WIFI_DEVICES or FINE_LOCATION depending on Android version
