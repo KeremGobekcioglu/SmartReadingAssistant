@@ -14,7 +14,6 @@
 #error Bluetooth is not enabled! Please run `make menuconfig` to enable it
 #endif
 
-
 // ======================= PIN DEFINITIONS =======================
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
@@ -32,7 +31,10 @@
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
-#define FLASH_LED_PIN      4
+
+// Flash LED Pin (adjust based on your hardware)
+#define FLASH_LED_PIN      4  // GPIO4 is common for ESP32-CAM flash
+
 // ======================= BLE SETTINGS (Nordic UART Service) =======================
 #define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" 
 #define RX_CHARACTERISTIC   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E" // App writes here
@@ -69,6 +71,8 @@ void logStr(const String& message) {
 void loglnStr(const String& message) {
   Serial.println(message);
 }
+
+// ======================= FLASH CONTROL =======================
 void setupFlash() {
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW);
@@ -80,6 +84,7 @@ void setFlash(bool state) {
   Serial.print("Flash: ");
   Serial.println(state ? "ON" : "OFF");
 }
+
 // ======================= CAMERA SETUP =======================
 void setupCamera() {
   logln("Initializing camera...");
@@ -106,27 +111,14 @@ void setupCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  // Memory optimized settings
-config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  
-  // ==========================================================
-  //                *** MAX QUALITY SETTINGS ***
-  // ==========================================================
+  // MAX QUALITY SETTINGS
   if(psramFound()){
-    // Use the highest standard resolution
     config.frame_size = FRAMESIZE_UXGA;    // 1600x1200 pixels
-    
-    // JPEG Quality: 0 is highest quality (least compression), 63 is lowest.
-    // We target 10 or lower for high quality.
     config.jpeg_quality = 10;
-    
-    // Use 2 buffers if PSRAM is plentiful and we need speed, but 1 is safest for RAM.
     config.fb_count = 1;
     config.grab_mode = CAMERA_GRAB_LATEST;
   } else {
-    // If no PSRAM, we must stick to lower resolutions.
-    config.frame_size = FRAMESIZE_SVGA;    // 800x600 pixels (Max safe for no-PSRAM)
+    config.frame_size = FRAMESIZE_SVGA;    // 800x600 pixels
     config.jpeg_quality = 12;
     config.fb_count = 1;
   }
@@ -176,25 +168,27 @@ void handleCapture() {
   
   esp_camera_fb_return(fb);
 }
+
+// NEW: Control endpoint for flash and other devices (matches Android API)
 void handleControl() {
-  if (!server.hasArg("device") || !server.hasArg("value")) {
-    server.send(400, "text/plain", "Missing device or value parameter");
+  if (!server.hasArg("var") || !server.hasArg("val")) {
+    server.send(400, "text/plain", "Missing var or val parameter");
     return;
   }
   
-  String device = server.arg("device");
-  int value = server.arg("value").toInt();
+  String variable = server.arg("var");
+  int value = server.arg("val").toInt();
   
-  Serial.print("Control request - Device: ");
-  Serial.print(device);
+  Serial.print("Control request - Variable: ");
+  Serial.print(variable);
   Serial.print(", Value: ");
   Serial.println(value);
   
-  if (device == "flash") {
+  if (variable == "flash") {
     setFlash(value == 1);
     server.send(200, "text/plain", "OK");
   } else {
-    server.send(400, "text/plain", "Unknown device");
+    server.send(400, "text/plain", "Unknown variable");
   }
 }
 
@@ -210,8 +204,8 @@ void handleRoot() {
   html += "<p>Camera: " + String(cameraInitialized ? "Ready" : "Not Initialized") + "</p>";
   html += "<p><a href='/capture'>Capture Image</a></p>";
   html += "<p><a href='/status'>Status</a></p>";
-  html += "<p><a href='/control?device=flash&value=1'>Flash ON</a></p>";
-  html += "<p><a href='/control?device=flash&value=0'>Flash OFF</a></p>";
+  html += "<p><a href='/control?var=flash&val=1'>Flash ON</a></p>";
+  html += "<p><a href='/control?var=flash&val=0'>Flash OFF</a></p>";
   html += "</body></html>";
   server.send(200, "text/html", html);
 }
@@ -231,13 +225,11 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
-        // Use String briefly to get value
         String tempRxValue = pCharacteristic->getValue();
         const char* rawData = tempRxValue.c_str();
         int len = tempRxValue.length();
 
         if (len > 0) {
-            // Find comma separator
             const char* commaPtr = strchr(rawData, ',');
             
             if (commaPtr != NULL) {
@@ -245,7 +237,6 @@ class MyCallbacks: public BLECharacteristicCallbacks {
                 const char* passPtr = commaPtr + 1;
                 size_t passLen = len - ssidLen - 1;
 
-                // Copy to safe buffers
                 if (ssidLen < sizeof(ssid_buf) && passLen < sizeof(pass_buf)) {
                     strncpy(ssid_buf, rawData, ssidLen);
                     ssid_buf[ssidLen] = '\0';
@@ -270,14 +261,12 @@ void setupBLE() {
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  // RX Characteristic (Phone writes here)
   pRxCharacteristic = pService->createCharacteristic(
                       RX_CHARACTERISTIC,
                       BLECharacteristic::PROPERTY_WRITE
                     );
   pRxCharacteristic->setCallbacks(new MyCallbacks());
 
-  // TX Characteristic (ESP32 sends notifications here)
   pTxCharacteristic = pService->createCharacteristic(
                         TX_CHARACTERISTIC,
                         BLECharacteristic::PROPERTY_NOTIFY
@@ -299,22 +288,18 @@ void setupBLE() {
 
 // ======================= MAIN SETUP =======================
 void setup() {
-  // Disable brownout detector
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
   
   Serial.begin(115200);
   delay(1000);
   
-  // Start Bluetooth Serial for wireless logging
-  delay(500);
-  
-  logln("\n=== SmartGlasses v4.0 ===");
+  logln("\n=== SmartGlasses v4.1 ===");
   logln("Bluetooth Serial: SmartGlasses-Debug");
   logln("BLE UART: SmartGlasses");
   logln("IMPORTANT: Set Partition Scheme to 'Huge APP (3MB No OTA)'");
   
-  // Initialize camera first
-  // setupCamera();
+  // Initialize flash LED
+  setupFlash();
   
   // Initialize BLE
   setupBLE();
@@ -323,7 +308,6 @@ void setup() {
 }
 
 void loop() {
-  // Handle credentials received via BLE
   if (credentialsReady) {
     credentialsReady = false;
 
@@ -331,14 +315,11 @@ void loop() {
       Serial.print("Connecting to: ");
       Serial.println(ssid_buf);
       
-      // NOTICE: We do NOT kill BLE yet. We need it to send the IP.
-      
       Serial.println("Starting WiFi...");
       WiFi.mode(WIFI_STA);
       WiFi.begin(ssid_buf, pass_buf);
       
       int retries = 0;
-      // Wait up to 15 seconds for WiFi
       while (WiFi.status() != WL_CONNECTED && retries < 30) {
         delay(500);
         Serial.print(".");
@@ -346,43 +327,63 @@ void loop() {
       }
       Serial.println("");
 
-if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    String ipAddr = WiFi.localIP().toString();
-      Serial.println("\n=== WiFi Connected Successfully ===");
-    Serial.print("IP Address: ");
-    Serial.println(ipAddr);
-    Serial.print("SSID: ");
-    Serial.println(ssid_buf);
-    Serial.println("====================================\n");
-    // 1. Send IP via BLE first
-    if (deviceConnected && pTxCharacteristic != NULL) {
-        String msg = "IP:" + ipAddr;
-        pTxCharacteristic->setValue(msg.c_str());
-        pTxCharacteristic->notify();
-        delay(1000); // Give BLE time to actually push the data out
-    }
+      if (WiFi.status() == WL_CONNECTED) {
+        wifiConnected = true;
+        String ipAddr = WiFi.localIP().toString();
 
-    // 2. SHUT DOWN BLE COMPLETELY to free RAM
-    logln("Shutting down BLE to free memory...");
-    BLEDevice::deinit(true); 
-    delay(500); // Let the heap settle
+        // LOG CONNECTION SUCCESS
+        Serial.println("\n=== WiFi Connected Successfully ===");
+        Serial.print("IP Address: ");
+        Serial.println(ipAddr);
+        Serial.print("SSID: ");
+        Serial.println(ssid_buf);
+        Serial.println("====================================\n");
 
-    // 3. NOW initialize the camera
-    setupCamera(); 
+        // Send IP via BLE
+        if (deviceConnected && pTxCharacteristic != NULL) {
+          String msg = "IP:" + ipAddr;
+          
+          Serial.print("Sending IP via BLE: ");
+          Serial.println(msg);
+          
+          pTxCharacteristic->setValue(msg.c_str());
+          pTxCharacteristic->notify();
+          
+          Serial.println("BLE notification sent!");
+          
+          delay(1000);
+        } else {
+          Serial.println("WARNING: BLE not connected, cannot send IP!");
+        }
 
-    // 4. Start Web Server
-    if (cameraInitialized) {
-        server.on("/", handleRoot);
-        server.on("/capture", handleCapture);
-        server.on("/status", handleStatus);
-        server.on("/control", handleControl);
-        server.begin();
-        logln("Web Server Started");
-    }
-}else {
+        // Shut down BLE to free RAM
+        logln("Shutting down BLE to free memory...");
+        BLEDevice::deinit(true); 
+        delay(500);
+
+        // Initialize camera
+        setupCamera(); 
+
+        // Start Web Server
+        if (cameraInitialized) {
+          server.on("/", handleRoot);
+          server.on("/capture", handleCapture);
+          server.on("/status", handleStatus);
+          server.on("/control", handleControl);  // NEW: Control endpoint
+          server.begin();
+          
+          Serial.println("\n=== Web Server Started ===");
+          Serial.print("Access camera at: http://");
+          Serial.println(ipAddr);
+          Serial.println("Endpoints:");
+          Serial.println("  - /");
+          Serial.println("  - /capture");
+          Serial.println("  - /status");
+          Serial.println("  - /control?var=flash&val=1");
+          Serial.println("==========================\n");
+        }
+      } else {
         Serial.println("WiFi Failed! Wrong Password?");
-        // Blink LED or restart advertising here if needed
       }
     }
   }
