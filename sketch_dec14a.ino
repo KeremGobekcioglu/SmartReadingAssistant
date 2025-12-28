@@ -7,7 +7,6 @@
 #include <BLE2902.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
-#include "BluetoothSerial.h"
 #include <string.h>
 
 // Check if Bluetooth is available
@@ -15,7 +14,6 @@
 #error Bluetooth is not enabled! Please run `make menuconfig` to enable it
 #endif
 
-BluetoothSerial SerialBT;
 
 // ======================= PIN DEFINITIONS =======================
 #define PWDN_GPIO_NUM     32
@@ -34,7 +32,7 @@ BluetoothSerial SerialBT;
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
-
+#define FLASH_LED_PIN      4
 // ======================= BLE SETTINGS (Nordic UART Service) =======================
 #define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" 
 #define RX_CHARACTERISTIC   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E" // App writes here
@@ -58,32 +56,30 @@ WebServer server(80);
 // ======================= LOGGING HELPERS =======================
 void log(const char* message) {
   Serial.print(message);
-  if (SerialBT.hasClient()) {
-    SerialBT.print(message);
-  }
 }
 
 void logln(const char* message) {
   Serial.println(message);
-  if (SerialBT.hasClient()) {
-    SerialBT.println(message);
-  }
 }
 
 void logStr(const String& message) {
   Serial.print(message);
-  if (SerialBT.hasClient()) {
-    SerialBT.print(message);
-  }
 }
 
 void loglnStr(const String& message) {
   Serial.println(message);
-  if (SerialBT.hasClient()) {
-    SerialBT.println(message);
-  }
+}
+void setupFlash() {
+  pinMode(FLASH_LED_PIN, OUTPUT);
+  digitalWrite(FLASH_LED_PIN, LOW);
+  logln("Flash LED initialized");
 }
 
+void setFlash(bool state) {
+  digitalWrite(FLASH_LED_PIN, state ? HIGH : LOW);
+  Serial.print("Flash: ");
+  Serial.println(state ? "ON" : "OFF");
+}
 // ======================= CAMERA SETUP =======================
 void setupCamera() {
   logln("Initializing camera...");
@@ -180,6 +176,27 @@ void handleCapture() {
   
   esp_camera_fb_return(fb);
 }
+void handleControl() {
+  if (!server.hasArg("device") || !server.hasArg("value")) {
+    server.send(400, "text/plain", "Missing device or value parameter");
+    return;
+  }
+  
+  String device = server.arg("device");
+  int value = server.arg("value").toInt();
+  
+  Serial.print("Control request - Device: ");
+  Serial.print(device);
+  Serial.print(", Value: ");
+  Serial.println(value);
+  
+  if (device == "flash") {
+    setFlash(value == 1);
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Unknown device");
+  }
+}
 
 void handleStatus() {
   String status = cameraInitialized ? "READY" : "CAMERA_NOT_INITIALIZED";
@@ -193,6 +210,8 @@ void handleRoot() {
   html += "<p>Camera: " + String(cameraInitialized ? "Ready" : "Not Initialized") + "</p>";
   html += "<p><a href='/capture'>Capture Image</a></p>";
   html += "<p><a href='/status'>Status</a></p>";
+  html += "<p><a href='/control?device=flash&value=1'>Flash ON</a></p>";
+  html += "<p><a href='/control?device=flash&value=0'>Flash OFF</a></p>";
   html += "</body></html>";
   server.send(200, "text/html", html);
 }
@@ -287,7 +306,6 @@ void setup() {
   delay(1000);
   
   // Start Bluetooth Serial for wireless logging
-  SerialBT.begin("SmartGlasses-Debug");
   delay(500);
   
   logln("\n=== SmartGlasses v4.0 ===");
@@ -296,7 +314,7 @@ void setup() {
   logln("IMPORTANT: Set Partition Scheme to 'Huge APP (3MB No OTA)'");
   
   // Initialize camera first
-  setupCamera();
+  // setupCamera();
   
   // Initialize BLE
   setupBLE();
@@ -310,92 +328,68 @@ void loop() {
     credentialsReady = false;
 
     if (!wifiConnected) {
-      log("Connecting to: ");
-      logln(ssid_buf);
+      Serial.print("Connecting to: ");
+      Serial.println(ssid_buf);
       
-      // CRITICAL: Completely deinitialize BLE to free memory for WiFi
-      logln("Shutting down BLE...");
-      if(pServer) {
-        pServer->getAdvertising()->stop();
-      }
-      delay(500);
+      // NOTICE: We do NOT kill BLE yet. We need it to send the IP.
       
-      // Deinitialize BLE completely
-      BLEDevice::deinit(false);  // false = release BLE resources but keep Bluetooth for SerialBT
-      delay(1000);  // Give time for BLE to fully shutdown
-      
-      logln("Starting WiFi...");
-      
-      // Start WiFi
+      Serial.println("Starting WiFi...");
       WiFi.mode(WIFI_STA);
       WiFi.begin(ssid_buf, pass_buf);
       
       int retries = 0;
+      // Wait up to 15 seconds for WiFi
       while (WiFi.status() != WL_CONNECTED && retries < 30) {
         delay(500);
-        log(".");
+        Serial.print(".");
         retries++;
-        yield();
       }
-      logln("");
+      Serial.println("");
 
-      if (WiFi.status() == WL_CONNECTED) {
-        wifiConnected = true;
-        WiFi.setSleep(false);
-        
-        String ipMsg = "WiFi Connected! IP: " + WiFi.localIP().toString();
-        loglnStr(ipMsg);
+if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    String ipAddr = WiFi.localIP().toString();
+      Serial.println("\n=== WiFi Connected Successfully ===");
+    Serial.print("IP Address: ");
+    Serial.println(ipAddr);
+    Serial.print("SSID: ");
+    Serial.println(ssid_buf);
+    Serial.println("====================================\n");
+    // 1. Send IP via BLE first
+    if (deviceConnected && pTxCharacteristic != NULL) {
+        String msg = "IP:" + ipAddr;
+        pTxCharacteristic->setValue(msg.c_str());
+        pTxCharacteristic->notify();
+        delay(1000); // Give BLE time to actually push the data out
+    }
 
-        // NOTE: BLE is now deinitialized, so we can't send notifications
-        // IP address is available in Bluetooth Serial logs
-        
-        // Start web server
+    // 2. SHUT DOWN BLE COMPLETELY to free RAM
+    logln("Shutting down BLE to free memory...");
+    BLEDevice::deinit(true); 
+    delay(500); // Let the heap settle
+
+    // 3. NOW initialize the camera
+    setupCamera(); 
+
+    // 4. Start Web Server
+    if (cameraInitialized) {
         server.on("/", handleRoot);
         server.on("/capture", handleCapture);
         server.on("/status", handleStatus);
+        server.on("/control", handleControl);
         server.begin();
         logln("Web Server Started");
-        
-        if (cameraInitialized) {
-          logln("System fully operational!");
-        } else {
-          logln("Warning: Camera failed to initialize");
-        }
-        
-      } else {
-        logln("WiFi Failed!");
-        
-        // Reinitialize BLE for retry
-        logln("Restarting BLE...");
-        setupBLE();
-      }
     }
-  }
-
-  // Handle BLE connection state changes (only if BLE is active)
-  if (!wifiConnected) {
-    if (!deviceConnected && oldDeviceConnected) {
-      delay(500);
-      if (pServer) {
-        pServer->startAdvertising();
-        logln("BLE advertising restarted after disconnect");
+}else {
+        Serial.println("WiFi Failed! Wrong Password?");
+        // Blink LED or restart advertising here if needed
       }
-      oldDeviceConnected = deviceConnected;
-    }
-
-    if (deviceConnected && !oldDeviceConnected) {
-      oldDeviceConnected = deviceConnected;
-      logln("BLE device connected");
     }
   }
 
   // Handle web requests
   if (wifiConnected && WiFi.status() == WL_CONNECTED) {
     server.handleClient();
-  } else if (wifiConnected && WiFi.status() != WL_CONNECTED) {
-    logln("WiFi Lost! Restarting...");
-    delay(2000);
-    ESP.restart();
   }
   
   delay(10);
