@@ -37,6 +37,11 @@ import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicNone
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.gobex.smartreadingassistant.core.audio.SttState
+import com.gobex.smartreadingassistant.feature.conversation.presentation.screens.components.CapturedImageDialog
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,7 +53,9 @@ fun ChatTestScreen(
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-
+    val sttState by viewModel.sttState.collectAsStateWithLifecycle(
+        initialValue = SttState.Idle
+    )
     // Side Effects
     LaunchedEffect(Unit) {
         viewModel.uiEffect.collectLatest { effect ->
@@ -68,13 +75,18 @@ fun ChatTestScreen(
         }
     }
 
+    // Image Preview Dialog
+    CapturedImageDialog(
+        imageBytes = uiState.capturedImageBytes,
+        onDismiss = { viewModel.clearImagePreview() }
+    )
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Gemini Test Console") },
                 actions = {
-                    // --- FLASH TOGGLE BUTTON ---
-                    val isFlashOn = uiState.isFlashOn // Assuming you add this to your UiState
+                    val isFlashOn = uiState.isFlashOn
                     IconButton(onClick = { viewModel.toggleFlash(!isFlashOn) }) {
                         Icon(
                             imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
@@ -96,7 +108,6 @@ fun ChatTestScreen(
             DeveloperInputBar(
                 isStreaming = uiState.isStreaming,
                 onSend = { text, uri ->
-                    // Convert URI to Base64 here (Simulation Only)
                     scope.launch(Dispatchers.IO) {
                         val base64 = uri?.let {
                             context.contentResolver.openInputStream(it)?.use { stream ->
@@ -109,7 +120,10 @@ fun ChatTestScreen(
                         }
                     }
                 },
-                onCapturePhoto = { viewModel.captureAndAnalyze() } // New Callback
+                onCapturePhoto = { viewModel.captureAndAnalyze() },
+                sttState = sttState, // <--- Pass State
+                onStartListening = { viewModel.startListening() }, // <--- Pass Action
+                onStopListening = { viewModel.stopListening() },   // <--- Pass Action
             )
         }
     ) { padding ->
@@ -138,6 +152,9 @@ fun ChatTestScreen(
 @Composable
 fun DeveloperInputBar(
     isStreaming: Boolean,
+    sttState: SttState,
+    onStartListening: () -> Unit,
+    onStopListening: () -> Unit,
     onSend: (String, Uri?) -> Unit,
     onCapturePhoto: () -> Unit
 ) {
@@ -165,6 +182,18 @@ fun DeveloperInputBar(
             Modifier.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val isListening = sttState is SttState.Listening
+            IconButton(
+                onClick = { if (isListening) onStopListening() else onStartListening() },
+                colors = IconButtonDefaults.iconButtonColors(
+                    contentColor = if (isListening) Color.Red else MaterialTheme.colorScheme.primary
+                )
+            ) {
+                Icon(
+                    imageVector = if (isListening) Icons.Default.Mic else Icons.Default.MicNone,
+                    contentDescription = "Voice Input"
+                )
+            }
             IconButton(onClick = { launcher.launch("image/*") }) {
                 Icon(Icons.Default.AddPhotoAlternate, "Upload")
             }

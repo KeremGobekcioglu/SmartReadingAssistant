@@ -16,4 +16,7 @@ interface Esp32ApiService {
         @Query("var") variable: String,
         @Query("val") value: Int
     ) : Response<ResponseBody>
+
+    @GET("ping")
+    suspend fun ping(): Response<ResponseBody>
 }

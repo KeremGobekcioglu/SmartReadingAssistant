@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.gobex.smartreadingassistant.core.audio.SpeechToTextManager
+import com.gobex.smartreadingassistant.core.audio.SttState
+import com.gobex.smartreadingassistant.core.audio.TextToSpeechManager
 import com.gobex.smartreadingassistant.core.connectivity.BleConnectionManager
+import com.gobex.smartreadingassistant.core.connectivity.DeviceConnectionManager
 import com.gobex.smartreadingassistant.core.connectivity.HotspotManager
 import com.gobex.smartreadingassistant.core.connectivity.HotspotService
 import com.gobex.smartreadingassistant.core.connectivity.NetworkScanner
@@ -19,10 +23,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -33,125 +40,111 @@ import kotlin.jvm.java
 // 1. The "Billboard": Persistent data the UI simply displays.
     @HiltViewModel
     class ConversationViewModel @Inject constructor(
-        private val repository: LLMRepository,
+    private val repository: LLMRepository,
         // IoT Dependencies
-        private val hotspotManager: HotspotManager,
-        private val bleManager: BleConnectionManager,
-        private val networkScanner: NetworkScanner,
-        private val deviceRepository: DeviceRepository,
-    @ApplicationContext private val context: Context
+    private val connectionManager: DeviceConnectionManager,
+    private val deviceRepository: DeviceRepository,
+    private val sttManager: SpeechToTextManager,
+    private val ttsManager: TextToSpeechManager
     ) : ViewModel() {
 
-        // 1. UI State
-        private val _state = MutableStateFlow(ConversionState())
-        val state: StateFlow<ConversionState> = _state.asStateFlow()
+    // ==================== UI State ====================
+    private val _state = MutableStateFlow(ConversionState())
+    val state: StateFlow<ConversionState> = _state.asStateFlow()
 
-        // 2. One-shot Effects
-        private val _uiEffect = Channel<ConversationEffect>()
-        public val uiEffect = _uiEffect.receiveAsFlow()
+    // One-shot Effects
+    private val _uiEffect = Channel<ConversationEffect>()
+    val uiEffect = _uiEffect.receiveAsFlow()
 
-        // 3. Connection Specific State
-        private val _isDeviceConnected = MutableStateFlow(false)
-        public val isDeviceConnected = _isDeviceConnected.asStateFlow()
+    // ==================== Connection State (Observe from Manager) ====================
+    val connectionState: StateFlow<DeviceConnectionManager.ConnectionState> = connectionManager.state
+    val activeConnection = connectionManager.activeConnection
+    val sttState = sttManager.state
+    val connectionStatus: StateFlow<String> = connectionManager.state.map { state ->
+        when (state) {
+            is DeviceConnectionManager.ConnectionState.Disconnected -> "Ready to Connect"
+            is DeviceConnectionManager.ConnectionState.Connecting -> state.step
+            is DeviceConnectionManager.ConnectionState.Connected -> "Connected to ${state.ip}"
+            is DeviceConnectionManager.ConnectionState.Error -> "Error: ${state.message}"
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = "Ready to Connect"
+    )
 
-        private val _connectionStatus = MutableStateFlow("Ready to Connect")
-        val connectionStatus = _connectionStatus.asStateFlow()
-    private val _assignedIp = MutableStateFlow<String?>(null)
-    val assignedIp: StateFlow<String?> = _assignedIp.asStateFlow()
+    val isDeviceConnected: StateFlow<Boolean> = connectionManager.state.map { state ->
+        state is DeviceConnectionManager.ConnectionState.Connected
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = false
+    )
+
+    val assignedIp: StateFlow<String?> = connectionManager.state.map { state ->
+        (state as? DeviceConnectionManager.ConnectionState.Connected)?.ip
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = null
+    )
         init {
             loadHistory()
+            observeStt()
         }
 
         // ====================================================================================
         //                                  IOT CONNECTION LOGIC
         // ====================================================================================
-
-    fun connectToSmartGlasses() = viewModelScope.launch {
-        // Start the Foreground Service for visual notification
-        val serviceIntent = Intent(context, HotspotService::class.java)
-        context.startService(serviceIntent)
-
-        _connectionStatus.value = "Starting Hotspot..."
-
-        try {
-            // Collect the Hotspot credentials (SSID/PASS)
-            hotspotManager.startHotspot().collect { creds ->
-                _connectionStatus.value = "Sending Credentials (BLE)..."
-
-                // 1. Send credentials to ESP32 via BLE
-                bleManager.startConnectionSequence(creds.ssid, creds.pass)
-
-                // 2. WAIT for the ESP32 to send its IP back via BLE (15s timeout)
-                val ipViaBle = withTimeoutOrNull(15_000) {
-                    bleManager.deviceIpFlow.first { it.isNotEmpty() }
-                }
-
-                if (ipViaBle != null) {
-                    finalizeConnection(ipViaBle, serviceIntent)
-                } else {
-                    // 3. FALLBACK: If BLE fails/times out, start polling the network
-                    _connectionStatus.value = "BLE Timeout. Scanning Network..."
-
-                    val scannedIp = scanForDeviceWithRetry(maxDurationMs = 15_000)
-
-                    if (scannedIp != null) {
-                        finalizeConnection(scannedIp, serviceIntent)
-                    } else {
-                        handleConnectionFailure(serviceIntent, "Could not find glasses on network.")
+        // 1. Observe STT: When user finishes speaking, send to Gemini
+        private fun observeStt() = viewModelScope.launch {
+            sttManager.state.collect { sttState ->
+                when (sttState) {
+                    is SttState.Result -> {
+                        stopListening() // Ensure UI updates
+                        sendPrompt(sttState.text)
                     }
+                    is SttState.Error -> {
+                        _uiEffect.send(ConversationEffect.ShowError(sttState.error))
+                    }
+                    else -> {}
                 }
             }
+        }
+
+    // 2. Audio Control Methods
+    fun startListening() {
+        ttsManager.stop() // Stop TTS if user wants to speak
+        sttManager.startListening()
+    }
+
+    fun stopListening() {
+        sttManager.stopListening()
+    }
+
+    fun stopSpeaking() {
+        ttsManager.stop()
+    }
+    fun connectToSmartGlasses() = viewModelScope.launch {
+        try {
+            connectionManager.connect()
         } catch (e: Exception) {
-            handleConnectionFailure(serviceIntent, "Hotspot Error: ${e.message}")
+            _uiEffect.send(ConversationEffect.ShowError(e.message ?: "Connection failed"))
         }
     }
 
-    /**
-     * Retries scanning the subnet for the ESP32.
-     * This is needed because the ESP32 might still be connecting to WiFi when the first scan runs.
-     */
-    private suspend fun scanForDeviceWithRetry(maxDurationMs: Long): String? {
-        val startTime = System.currentTimeMillis()
-        while (System.currentTimeMillis() - startTime < maxDurationMs) {
-            val ip = networkScanner.findEsp32Ip()
-            if (ip != null) return ip
-            delay(2000) // Wait 2 seconds before trying again
-        }
-        return null
-    }
-
-    private fun finalizeConnection(ip: String, serviceIntent: Intent) {
-        // Save the IP so the UI can show it
-        _assignedIp.value = ip
-
-        deviceRepository.connectToDeviceServer(ip)
-        _isDeviceConnected.value = true
-        _connectionStatus.value = "Connected to $ip" // Show IP in status
-
-        // Stop the notification service
-        context.stopService(serviceIntent)
-
-        // REMOVED: The automatic navigation effect so user can see the IP first
-        // viewModelScope.launch {
-        //    _uiEffect.send(ConversationEffect.NavigateToChat)
-        // }
-    }
-
-    private suspend fun handleConnectionFailure(serviceIntent: Intent, errorMsg: String) {
-        _connectionStatus.value = "Connection Failed"
-        context.stopService(serviceIntent)
-        hotspotManager.stopHotspot()
-        _uiEffect.send(ConversationEffect.ShowError(errorMsg))
+    fun disconnectFromSmartGlasses() = viewModelScope.launch {
+        connectionManager.disconnect()
     }
         // ====================================================================================
         //                                  HARDWARE CAPTURE
         // ====================================================================================
 
         fun captureAndAnalyze() = viewModelScope.launch {
-            if (!_isDeviceConnected.value && _assignedIp.value == null) {
-                _uiEffect.send(ConversationEffect.ShowError("Glasses not connected"))
-                return@launch
-            }
+//            if (!_isDeviceConnected.value && _assignedIp.value == null) {
+//                _uiEffect.send(ConversationEffect.ShowError("Glasses not connected"))
+//                return@launch
+//            }
 
             _state.update { it.copy(isStreaming = true, currentText = "Capturing photo...") }
 
@@ -159,6 +152,8 @@ import kotlin.jvm.java
             val result = deviceRepository.captureImage()
 
             result.onSuccess { imageBytes ->
+
+                _state.update { it.copy(capturedImageBytes = imageBytes) }
                 // 2. Convert to Base64
                 val base64 =
                     android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP)
@@ -207,6 +202,7 @@ import kotlin.jvm.java
             imageBase64: String? = null,
             messages: List<Message>
         ) {
+            val speechBuffer = StringBuilder()
             try {
                 // This opens a pipe to llm api.
                 // We use collect since it is a flow and flow keeps returning data over and over.
@@ -227,6 +223,10 @@ import kotlin.jvm.java
 
                         is StreamResult.Complete -> {
                             // in here we copy the old list and add the final message to it.
+                            if (speechBuffer.isNotEmpty()) {
+                                ttsManager.speak(speechBuffer.toString())
+                                speechBuffer.clear()
+                            }
                             _state.update { state ->
                                 val updatedList = state.messages.toMutableList()
                                 updatedList.add(result.fullMessage)
@@ -242,6 +242,9 @@ import kotlin.jvm.java
                             _state.update { state ->
                                 state.copy(currentText = state.currentText + result.text)
                             }
+                            // B. Buffer for Audio (Wait for sentence)
+                            speechBuffer.append(result.text)
+                            checkForSentenceAndSpeak(speechBuffer)
                         }
                     }
                 }
@@ -271,7 +274,9 @@ import kotlin.jvm.java
                 _uiEffect.send(ConversationEffect.ShowError(e.message))
             }
         }
-
+    fun clearImagePreview() {
+        _state.update { it.copy(capturedImageBytes = null) }
+    }
         fun clearConversation() = viewModelScope.launch {
 //        repository.clearConversation()
             _state.update { it.copy(messages = emptyList()) }
@@ -332,6 +337,29 @@ import kotlin.jvm.java
 
             return inputCost + outputCost
         }
+    // Helper: Looks for punctuation, speaks the sentence, removes it from buffer
+    private fun checkForSentenceAndSpeak(buffer: StringBuilder) {
+        val text = buffer.toString()
+        // Regex looks for [.!?] followed by a space or end of line
+        val match = Regex("""([.!?])\s""").find(text)
+
+        if (match != null) {
+            val endParams = match.range.last // Index of the space after punctuation
+
+            // Extract the full sentence
+            val sentence = text.take(endParams)
+
+            // Speak it!
+            ttsManager.speak(sentence)
+
+            // Remove it from buffer, keeping the rest for the next chunk
+            buffer.delete(0, endParams + 1) // +1 to remove the split character
+        }
+    }
+    override fun onCleared() {
+        super.onCleared()
+        ttsManager.shutdown()
+    }
     }
 
 

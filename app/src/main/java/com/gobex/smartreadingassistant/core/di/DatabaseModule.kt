@@ -2,8 +2,11 @@ package com.gobex.smartreadingassistant.core.di
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.gobex.smartreadingassistant.core.db.AppDatabase
 import com.gobex.smartreadingassistant.feature.conversation.data.source.ConversationDAO
+import com.gobex.smartreadingassistant.feature.device.data.local.DeviceConnectionDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -15,24 +18,45 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
 
-    // 1. Tell Hilt how to build the Database
     @Provides
     @Singleton
-    fun provideAppDatabase(
-        @ApplicationContext context: Context
-    ): AppDatabase {
+    fun provideDatabase(@ApplicationContext context: Context): AppDatabase {
         return Room.databaseBuilder(
             context,
             AppDatabase::class.java,
-            "smart_reading_db" // Name of your database file
+            "smart_glasses_db"
         )
-            .fallbackToDestructiveMigration() // Optional: Clears DB if you change schema
+            .addMigrations(MIGRATION_1_2)
             .build()
     }
 
-    // 2. Tell Hilt how to get the DAO (This fixes your error!)
     @Provides
+    @Singleton
     fun provideConversationDAO(database: AppDatabase): ConversationDAO {
         return database.conversationDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideDeviceConnectionDao(database: AppDatabase): DeviceConnectionDao {
+        return database.deviceConnectionDao()
+    }
+}
+
+// Migration lives OUTSIDE the module
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS device_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                device_ip TEXT NOT NULL,
+                ssid TEXT NOT NULL,
+                connected_at INTEGER NOT NULL,
+                disconnected_at INTEGER,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                connection_method TEXT NOT NULL,
+                last_health_check INTEGER NOT NULL
+            )
+        """)
     }
 }

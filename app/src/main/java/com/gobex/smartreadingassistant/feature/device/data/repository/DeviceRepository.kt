@@ -18,6 +18,11 @@ class DeviceRepository @Inject constructor() {
         .readTimeout(20, TimeUnit.SECONDS) // wait for image at least some time
         .build()
 
+    private val pingClient = OkHttpClient.Builder()
+        .connectTimeout(2, TimeUnit.SECONDS)  // Very fast timeout for ping
+        .readTimeout(2, TimeUnit.SECONDS)
+        .build()
+
     // This method builds a retrofit instance to talk the esp32 server.
     fun connectToDeviceServer(ipAddress : String)
     {
@@ -29,6 +34,27 @@ class DeviceRepository @Inject constructor() {
 
         apiService = retrofit.create(Esp32ApiService::class.java)
         currentIP = ipAddress
+    }
+
+    /**
+     * Quick health check - returns true if device responds within 2 seconds
+     */
+    suspend fun pingDevice(ipAddress: String): Boolean {
+        return try {
+            // Create a temporary service just for ping with fast timeout
+            val pingRetrofit = Retrofit.Builder()
+                .baseUrl("http://$ipAddress/")
+                .client(pingClient)
+                .build()
+
+            val pingService = pingRetrofit.create(Esp32ApiService::class.java)
+            val response = pingService.ping()
+
+            response.isSuccessful
+        } catch (e: Exception) {
+            // Any error = device not reachable
+            false
+        }
     }
 
     suspend fun captureImage(): Result<ByteArray> {
