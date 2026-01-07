@@ -39,7 +39,7 @@
 #define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" 
 #define RX_CHARACTERISTIC   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E" // App writes here
 #define TX_CHARACTERISTIC   "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" // ESP32 notifies here
-#define WIFI_TIMEOUT_MS 9000  // 15 seconds before restart
+#define WIFI_TIMEOUT_MS 6000  // 6 seconds before restart
 unsigned long wifiDisconnectedTime = 0;
 bool wifiWasConnected = false;
 BLEServer* pServer = NULL;
@@ -91,6 +91,9 @@ void setFlash(bool state) {
 void setupCamera() {
   logln("Initializing camera...");
   
+  // Keep camera marked as NOT ready during entire setup
+  cameraInitialized = false;
+  
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -113,22 +116,11 @@ void setupCamera() {
   config.xclk_freq_hz = 10000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  // MAX QUALITY SETTINGS
-  // if(psramFound()){
-  //   config.frame_size = FRAMESIZE_UXGA;    // 1600x1200 pixels
-  //   config.jpeg_quality = 10;
-  //   config.fb_count = 1;
-  //   config.grab_mode = CAMERA_GRAB_LATEST;
-  // } else {
-  //   config.frame_size = FRAMESIZE_SVGA;    // 800x600 pixels
-  //   config.jpeg_quality = 12;
-  //   config.fb_count = 1;
-  // }
-config.frame_size = FRAMESIZE_SVGA; 
-  config.jpeg_quality = 15;        // Increase number = lower quality/smaller file
-  config.fb_count = 1;             // Must be 1 without PSRAM
+  config.frame_size = FRAMESIZE_SVGA; 
+  config.jpeg_quality = 15;
+  config.fb_count = 1;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-
+  
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     char buf[50];
@@ -137,13 +129,25 @@ config.frame_size = FRAMESIZE_SVGA;
     cameraInitialized = false;
     return;
   }
-  // Sensor "Warm-up": Capture and discard 2 frames to clear garbage data
-  for(int i = 0; i < 2; i++) {
+  
+  logln("Warming up camera sensor...");
+  
+  // Warm-up: Capture and IMMEDIATELY discard frames
+  for(int i = 0; i < 3; i++) {  // 3 frames is better than 2
     camera_fb_t * fb = esp_camera_fb_get();
     if(fb) {
+      // Immediately return without using the data at all
       esp_camera_fb_return(fb);
+      logln("Warm-up frame discarded");
+    } else {
+      logln("Warm-up frame capture failed");
     }
+    delay(100);  // Small delay between warm-up captures
   }
+  
+  logln("Camera warm-up complete");
+  
+  // ONLY NOW is camera ready for actual use
   cameraInitialized = true;
   logln("Camera initialized successfully!");
 }
