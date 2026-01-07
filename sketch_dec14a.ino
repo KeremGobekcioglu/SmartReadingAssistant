@@ -39,7 +39,9 @@
 #define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" 
 #define RX_CHARACTERISTIC   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E" // App writes here
 #define TX_CHARACTERISTIC   "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" // ESP32 notifies here
-
+#define WIFI_TIMEOUT_MS 9000  // 15 seconds before restart
+unsigned long wifiDisconnectedTime = 0;
+bool wifiWasConnected = false;
 BLEServer* pServer = NULL;
 BLECharacteristic* pTxCharacteristic = NULL;
 BLECharacteristic* pRxCharacteristic = NULL;
@@ -108,20 +110,24 @@ void setupCamera() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 10000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
   // MAX QUALITY SETTINGS
-  if(psramFound()){
-    config.frame_size = FRAMESIZE_UXGA;    // 1600x1200 pixels
-    config.jpeg_quality = 10;
-    config.fb_count = 1;
-    config.grab_mode = CAMERA_GRAB_LATEST;
-  } else {
-    config.frame_size = FRAMESIZE_SVGA;    // 800x600 pixels
-    config.jpeg_quality = 12;
-    config.fb_count = 1;
-  }
+  // if(psramFound()){
+  //   config.frame_size = FRAMESIZE_UXGA;    // 1600x1200 pixels
+  //   config.jpeg_quality = 10;
+  //   config.fb_count = 1;
+  //   config.grab_mode = CAMERA_GRAB_LATEST;
+  // } else {
+  //   config.frame_size = FRAMESIZE_SVGA;    // 800x600 pixels
+  //   config.jpeg_quality = 12;
+  //   config.fb_count = 1;
+  // }
+config.frame_size = FRAMESIZE_SVGA; 
+  config.jpeg_quality = 15;        // Increase number = lower quality/smaller file
+  config.fb_count = 1;             // Must be 1 without PSRAM
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -131,7 +137,13 @@ void setupCamera() {
     cameraInitialized = false;
     return;
   }
-  
+  // Sensor "Warm-up": Capture and discard 2 frames to clear garbage data
+  for(int i = 0; i < 2; i++) {
+    camera_fb_t * fb = esp_camera_fb_get();
+    if(fb) {
+      esp_camera_fb_return(fb);
+    }
+  }
   cameraInitialized = true;
   logln("Camera initialized successfully!");
 }
@@ -196,7 +208,10 @@ void handleStatus() {
   String status = cameraInitialized ? "READY" : "CAMERA_NOT_INITIALIZED";
   server.send(200, "text/plain", status);
 }
-
+void handlePing() {
+  // Ultra-lightweight response for health checks
+  server.send(200, "text/plain", "PONG");
+}
 void handleRoot() {
   String html = "<!DOCTYPE html><html><body>";
   html += "<h1>SmartGlasses Camera</h1>";
@@ -286,6 +301,50 @@ void setupBLE() {
   logln("Format: SSID,PASSWORD");
 }
 
+// ======================= WATCHDOG FUNCTION =======================
+void checkWiFiWatchdog() {
+  wl_status_t status = WiFi.status();
+  
+  if (wifiConnected) {
+    // We WERE connected, now check if we still are
+    if (status != WL_CONNECTED) {
+      // Connection lost!
+      if (wifiDisconnectedTime == 0) {
+        // First time noticing disconnection
+        wifiDisconnectedTime = millis();
+        logln("⚠️  WiFi connection lost! Starting watchdog timer...");
+      } else {
+        // Check how long we've been disconnected
+        unsigned long disconnectedDuration = millis() - wifiDisconnectedTime;
+        
+        if (disconnectedDuration >= WIFI_TIMEOUT_MS) {
+          // Timeout exceeded - restart!
+          Serial.println("\n❌ WiFi connection lost for too long!");
+          Serial.println("🔄 Restarting ESP32 to restore connectivity...\n");
+          delay(1000);  // Give serial time to flush
+          ESP.restart();
+        } else {
+          // Still within timeout, log progress
+          if (disconnectedDuration % 3000 == 0) {  // Log every 3 seconds
+            Serial.print("⏳ Disconnected for ");
+            Serial.print(disconnectedDuration / 1000);
+            Serial.print("s / ");
+            Serial.print(WIFI_TIMEOUT_MS / 1000);
+            Serial.println("s");
+          }
+        }
+      }
+    } else {
+      // Connection restored!
+      if (wifiDisconnectedTime != 0) {
+        logln("✅ WiFi connection restored!");
+        wifiDisconnectedTime = 0;  // Reset timer
+      }
+    }
+  }
+}
+
+
 // ======================= MAIN SETUP =======================
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
@@ -317,8 +376,10 @@ void loop() {
       
       Serial.println("Starting WiFi...");
       WiFi.mode(WIFI_STA);
+      WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Max power
+      WiFi.setSleep(false);  // No power saving
       WiFi.begin(ssid_buf, pass_buf);
-      
+
       int retries = 0;
       while (WiFi.status() != WL_CONNECTED && retries < 30) {
         delay(500);
@@ -370,6 +431,7 @@ void loop() {
           server.on("/capture", handleCapture);
           server.on("/status", handleStatus);
           server.on("/control", handleControl);  // NEW: Control endpoint
+          server.on("/ping", handlePing);
           server.begin();
           
           Serial.println("\n=== Web Server Started ===");
@@ -393,5 +455,6 @@ void loop() {
     server.handleClient();
   }
   
+  checkWiFiWatchdog();
   delay(10);
 }
