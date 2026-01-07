@@ -27,14 +27,14 @@ fun HardwareKeyHandler(
     var downRunnable: Runnable? by remember { mutableStateOf(null) }
 
     DisposableEffect(activity) {
-        // This is the logic that MainActivity will call
         activity?.onHardwareKeyEvent = { event ->
             val keyCode = event.keyCode
 
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
                 when (event.action) {
                     KeyEvent.ACTION_DOWN -> {
-                        if (event.repeatCount == 0) { // Only start on the first press
+                        if (event.repeatCount == 0) {
+                            isLongPressActive = false // Reset state
                             val runnable = Runnable {
                                 isLongPressActive = true
                                 if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) onVolumeUp(true)
@@ -49,20 +49,22 @@ fun HardwareKeyHandler(
                                 handler.postDelayed(runnable, longPressTimeout)
                             }
                         }
-                        true // Consume the event
+                        // IMPORTANT: Return false so the system can start its own
+                        // volume repeat logic until our long-press Runnable triggers.
+                        false
                     }
                     KeyEvent.ACTION_UP -> {
-                        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                            upRunnable?.let { handler.removeCallbacks(it) }
-                            upRunnable = null
-                            if (!isLongPressActive) onVolumeUp(false)
-                        } else {
-                            downRunnable?.let { handler.removeCallbacks(it) }
-                            downRunnable = null
-                            if (!isLongPressActive) onVolumeDown(false)
-                        }
+                        upRunnable?.let { handler.removeCallbacks(it) }
+                        downRunnable?.let { handler.removeCallbacks(it) }
+
+                        val wasLongPress = isLongPressActive
                         isLongPressActive = false
-                        true // Consume the event
+
+                        // If it WAS a long press, consume the 'UP' event so we don't
+                        // trigger a tiny volume change at the end.
+                        // If it WAS NOT a long press, return false to let the system
+                        // finish the volume click.
+                        wasLongPress
                     }
                     else -> false
                 }

@@ -98,10 +98,11 @@ fun ChatTestScreen(
     }
 
     // Image Preview Dialog
-    CapturedImageDialog(
-        imageBytes = uiState.capturedImageBytes,
-        onDismiss = { viewModel.clearImagePreview() }
-    )
+//    CapturedImageDialog(
+//        imageBytes = uiState.capturedImageBytes,
+//        onDismiss = { viewModel.clearImagePreview()},
+//        showDialog = uiState.isImageDialogVisible
+//    )
 
     Scaffold(
         topBar = {

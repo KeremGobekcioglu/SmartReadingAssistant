@@ -6,46 +6,56 @@ import com.gobex.smartreadingassistant.feature.conversation.domain.Message
 data class ConversionState(
     val messages: List<Message> = emptyList(),
     val isStreaming: Boolean = false,
+    val currentText: String = "",
     val isLoadingHistory: Boolean = false,
-    val currentText: String = "", // temp text for AI's response
-    val isFlashOn: Boolean = false,
     val capturedImageBytes: ByteArray? = null,
-
-    // ===== NEW: Accessibility & Voice Control =====
-    val isAccessibilityMode: Boolean = false, // Voice-only mode enabled
-    val isVoiceAnnouncementsEnabled: Boolean = false, // Auto-announce state changes
-    val currentAppState: AppState = AppState.Idle, // For voice feedback
-    val lastAnnouncedState: AppState? = null // Prevent duplicate announcements
+    val currentImageUri: String? = null,  // ✅ ADD THIS!
+    val isImageDialogVisible: Boolean = false,
+    val isFlashOn: Boolean = false,
+    val isAccessibilityMode: Boolean = false,
+    val isVoiceAnnouncementsEnabled: Boolean = false,
+    val currentAppState: AppState = AppState.Idle,
+    val lastAnnouncedState: AppState? = null
 ) {
+    // ByteArray equality override if needed
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
 
         other as ConversionState
 
-        if (isStreaming != other.isStreaming) return false
-        if (isLoadingHistory != other.isLoadingHistory) return false
-        if (isFlashOn != other.isFlashOn) return false
         if (messages != other.messages) return false
+        if (isStreaming != other.isStreaming) return false
         if (currentText != other.currentText) return false
+        if (isLoadingHistory != other.isLoadingHistory) return false
+        if (capturedImageBytes != null) {
+            if (other.capturedImageBytes == null) return false
+            if (!capturedImageBytes.contentEquals(other.capturedImageBytes)) return false
+        } else if (other.capturedImageBytes != null) return false
+        if (currentImageUri != other.currentImageUri) return false  // ✅ ADD THIS!
+        if (isImageDialogVisible != other.isImageDialogVisible) return false
+        if (isFlashOn != other.isFlashOn) return false
         if (isAccessibilityMode != other.isAccessibilityMode) return false
         if (isVoiceAnnouncementsEnabled != other.isVoiceAnnouncementsEnabled) return false
         if (currentAppState != other.currentAppState) return false
-        if (!capturedImageBytes.contentEquals(other.capturedImageBytes)) return false
+        if (lastAnnouncedState != other.lastAnnouncedState) return false
 
         return true
     }
 
     override fun hashCode(): Int {
-        var result = isStreaming.hashCode()
-        result = 31 * result + isLoadingHistory.hashCode()
-        result = 31 * result + isFlashOn.hashCode()
-        result = 31 * result + messages.hashCode()
+        var result = messages.hashCode()
+        result = 31 * result + isStreaming.hashCode()
         result = 31 * result + currentText.hashCode()
+        result = 31 * result + isLoadingHistory.hashCode()
+        result = 31 * result + (capturedImageBytes?.contentHashCode() ?: 0)
+        result = 31 * result + (currentImageUri?.hashCode() ?: 0)  // ✅ ADD THIS!
+        result = 31 * result + isImageDialogVisible.hashCode()
+        result = 31 * result + isFlashOn.hashCode()
         result = 31 * result + isAccessibilityMode.hashCode()
         result = 31 * result + isVoiceAnnouncementsEnabled.hashCode()
         result = 31 * result + currentAppState.hashCode()
-        result = 31 * result + (capturedImageBytes?.contentHashCode() ?: 0)
+        result = 31 * result + (lastAnnouncedState?.hashCode() ?: 0)
         return result
     }
 }
@@ -114,13 +124,13 @@ object VoiceCommandParser {
 
     private val commandPatterns = mapOf(
         // Photo capture commands
-        listOf("take a picture", "capture photo", "take photo", "capture", "snap")
+        listOf("take a picture", "capture photo", "take photo", "capture", "snap" , "concon")
                 to VoiceCommand.CapturePhoto,
 
         // Flash control
-        listOf("flash on", "turn on flash", "enable flash")
+        listOf("flash on", "turn on flash", "enable flash" , "flush on" , "zenciboni")
                 to VoiceCommand.SetFlash(true),
-        listOf("flash off", "turn off flash", "disable flash")
+        listOf("flash off", "turn off flash", "disable flash" , "flush off" , "zencikoni")
                 to VoiceCommand.SetFlash(false),
         listOf("toggle flash", "switch flash")
                 to VoiceCommand.ToggleFlash,

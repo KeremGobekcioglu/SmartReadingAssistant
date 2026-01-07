@@ -1,14 +1,10 @@
 package com.gobex.smartreadingassistant.feature.conversation.presentation.screens
 
-import android.app.Activity
 import android.content.Context
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
-import android.view.KeyEvent
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -30,6 +26,7 @@ import com.gobex.smartreadingassistant.feature.conversation.presentation.Convers
 import com.gobex.smartreadingassistant.feature.conversation.presentation.AppState
 import com.gobex.smartreadingassistant.feature.conversation.presentation.screens.components.CapturedImageDialog
 import com.gobex.smartreadingassistant.feature.conversation.presentation.screens.components.HardwareKeyHandler
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 
 @Composable
@@ -37,71 +34,50 @@ fun AccessibleUserScreen(
     viewModel: ConversationViewModel = hiltViewModel(),
     onNavigateBack: () -> Unit
 ) {
-    Log.d("AccessibleUserScreen" , "Accessibility mode  : ${viewModel.state.value.isAccessibilityMode}")
     val uiState by viewModel.state.collectAsState()
     val sttState by viewModel.sttState.collectAsStateWithLifecycle(initialValue = SttState.Idle)
     val connectionState by viewModel.isDeviceConnected.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val activity = context as? ComponentActivity
 
+    // ===== PUSH-TO-TALK: HARDWARE BUTTONS =====
     HardwareKeyHandler(
         onVolumeUp = { isLongPress ->
-            vibrate(context, if(isLongPress) VibrationPattern.LONG_PRESS else VibrationPattern.SHORT_PRESS)
+            // We only care about ACTION_DOWN (press) and ACTION_UP (release)
+            // isLongPress here means "is currently being held"
+
             if (isLongPress) {
-                viewModel.captureAndAnalyze()
+                // Button pressed down - START listening
+                if (sttState !is SttState.Listening) {
+                    vibrate(context, VibrationPattern.START_LISTENING)
+                    viewModel.startListening()
+                    Log.d("PushToTalk", "Volume Up PRESSED - Starting listening")
+                }
             } else {
-                // Toggle Mic: If listening, stop. If idle, start.
-                if (sttState is SttState.Listening) viewModel.stopListening()
-                else viewModel.startListening()
+                // Button released - STOP listening
+                if (sttState is SttState.Listening) {
+                    vibrate(context, VibrationPattern.STOP_LISTENING)
+                    viewModel.stopListening()
+                    Log.d("PushToTalk", "Volume Up RELEASED - Stopping listening")
+                }
             }
         },
         onVolumeDown = { isLongPress ->
-            vibrate(context, if(isLongPress) VibrationPattern.SHORT_PRESS else VibrationPattern.LONG_PRESS)
             if (isLongPress) {
-                Log.d("AccessibleUserScreen" , "FLASH IS ${uiState.isFlashOn}")
-                viewModel.toggleFlash(!uiState.isFlashOn)
-            } else {
-                viewModel.stopSpeaking()
+                // Long press: Capture photo
+                vibrate(context, VibrationPattern.LONG_PRESS)
+                viewModel.captureImageOnly()
+                Log.d("PushToTalk", "Volume Down LONG PRESS - Capturing photo")
             }
+            // Short press: Do nothing (allow volume control)
         }
     )
-    // Setup volume button interception
-//    VolumeButtonHandler(
-//        activity = activity,
-//        enabled = uiState.isAccessibilityMode,
-//        onVolumeUp = { isLongPress ->
-//            if (isLongPress) {
-//                // Long press: Capture photo
-//                vibrate(context, VibrationPattern.LONG_PRESS)
-//                viewModel.captureAndAnalyze()
-//            } else {
-//                // Short press: Toggle microphone
-//                vibrate(context, VibrationPattern.SHORT_PRESS)
-//                when (sttState) {
-//                    is SttState.Listening -> viewModel.stopListening()
-//                    else -> viewModel.startListening()
-//                }
-//            }
-//        },
-//        onVolumeDown = { isLongPress ->
-//            if (isLongPress) {
-//                // Long press: Toggle flash
-//                vibrate(context, VibrationPattern.LONG_PRESS)
-//                viewModel.toggleFlash(!uiState.isFlashOn)
-//            } else {
-//                // Short press: Stop speaking
-//                vibrate(context, VibrationPattern.SHORT_PRESS)
-//                viewModel.stopSpeaking()
-//            }
-//        }
-//    )
 
-    // Handle effects
+    // ===== HANDLE EFFECTS =====
     LaunchedEffect(Unit) {
         viewModel.uiEffect.collectLatest { effect ->
             when (effect) {
                 is ConversationEffect.ShowError -> {
-                    // Errors are already announced via TTS in ViewModel
+                    // Errors announced via TTS
                 }
                 is ConversationEffect.AnnounceAction -> {
                     if (effect.withHaptic) {
@@ -113,80 +89,84 @@ fun AccessibleUserScreen(
         }
     }
 
-    // Back button handler with confirmation
-    BackHandler {
-        viewModel.announceAction("Press back again to exit")
-        // Simple implementation - you might want a proper confirmation dialog
-        onNavigateBack()
-    }
-
-    // Announce instructions on first launch
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(1000)
-        viewModel.announceAction(
-            "Voice mode active. " +
-                    "Press volume up to talk, volume down to stop speaking. " +
-                    "Long press volume up to take a picture. " +
-                    "Say commands like: take a picture, flash on, or ask me anything."
-        )
-    }
-
-    // 2. UI EFFECTS (Haptics)
-    // Your ViewModel already sends these effects
-    LaunchedEffect(Unit) {
-        viewModel.uiEffect.collectLatest { effect ->
-            if (effect is ConversationEffect.AnnounceAction && effect.withHaptic) {
-                vibrate(context, VibrationPattern.ACTION_CONFIRM)
-            }
-        }
-    }
-
-    // 3. NAVIGATION
+    // ===== BACK BUTTON =====
     BackHandler {
         viewModel.announceAction("Exiting voice mode")
+        viewModel.stopListening()
+        viewModel.disableAccessibilityMode()
         onNavigateBack()
     }
+
+    // ===== WELCOME ANNOUNCEMENT =====
+    LaunchedEffect(Unit) {
+        delay(500)
+        viewModel.announceAction(
+            "Push to talk mode active. " +
+                    "Hold volume up button to speak, release to send. " +
+                    "Hold volume down button to take a picture. " +
+                    "You can say commands like: take a picture, flash on, or ask me anything."
+        )
+    }
+    Log.d("ACCESSIBLE USER SCREEN", "DIALOG VISIBLE: ${uiState.isImageDialogVisible}")
+
+    Log.d("UI_RENDER", "Composing - isImageDialogVisible: ${uiState.isImageDialogVisible}")
+
     CapturedImageDialog(
         imageBytes = uiState.capturedImageBytes,
-        onDismiss = { viewModel.clearImagePreview() }
+        showDialog = uiState.isImageDialogVisible,
+        onDismiss = {
+            Log.d("UI_RENDER", "onDismiss callback triggered")
+            viewModel.dismissImageDialog()
+        }
     )
+    // ===== UI =====
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color.Black // Dark screen to save battery and reduce glare
+        color = Color.Black
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
+            // Top Section
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Connection Status
+                ConnectionStatusBadge(isConnected = connectionState)
 
-            // Connection Status Indicator
-            ConnectionStatusBadge(isConnected = connectionState)
+                Spacer(modifier = Modifier.height(32.dp))
 
-            Spacer(modifier = Modifier.height(32.dp))
+                // Main Status Display
+                StatusDisplay(
+                    appState = uiState.currentAppState,
+                    sttState = sttState,
+                    isStreaming = uiState.isStreaming
+                )
+            }
 
-            // Main Status Display
-            StatusDisplay(
-                appState = uiState.currentAppState,
-                sttState = sttState,
-                isStreaming = uiState.isStreaming
-            )
+            // Middle Section - BIG ASS TEXT
+            TranscribedTextDisplay(sttState = sttState , imageBytes = uiState.capturedImageBytes)
 
-            Spacer(modifier = Modifier.height(48.dp))
+            // Bottom Section
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Visual Indicators
+                VisualIndicators(
+                    isListening = sttState is SttState.Listening,
+                    isProcessing = uiState.isStreaming,
+                    isFlashOn = uiState.isFlashOn
+                )
 
-            // Visual Indicators (for sighted helpers)
-            VisualIndicators(
-                isListening = sttState is SttState.Listening,
-                isProcessing = uiState.isStreaming,
-                isFlashOn = uiState.isFlashOn
-            )
+                Spacer(modifier = Modifier.height(24.dp))
 
-            Spacer(modifier = Modifier.weight(1f))
-
-            // Button Guide (small text for helpers)
-            ButtonGuide()
+                // Button Guide
+                ButtonGuide()
+            }
         }
     }
 }
@@ -218,13 +198,12 @@ private fun StatusDisplay(
     sttState: SttState,
     isStreaming: Boolean
 ) {
-    // Determine what to show
     val statusText = when {
-        sttState is SttState.Listening -> "Listening..."
+        sttState is SttState.Listening -> "Hold & Speak..."
         isStreaming -> "Processing..."
         appState is AppState.Capturing -> appState.step
         appState is AppState.Speaking -> "Speaking..."
-        else -> "Ready"
+        else -> "Ready\n(Press Vol↑ to talk)"
     }
 
     val statusColor = when {
@@ -238,13 +217,13 @@ private fun StatusDisplay(
     ) {
         Text(
             text = statusText,
-            fontSize = 48.sp,
+            fontSize = 42.sp,
             fontWeight = FontWeight.Bold,
             color = statusColor,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            lineHeight = 50.sp
         )
 
-        // Animated indicator
         if (sttState is SttState.Listening || isStreaming) {
             Spacer(modifier = Modifier.height(16.dp))
             CircularProgressIndicator(
@@ -266,7 +245,6 @@ private fun VisualIndicators(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
     ) {
-        // Microphone indicator
         Icon(
             imageVector = if (isListening) Icons.Default.Mic else Icons.Default.MicNone,
             contentDescription = "Microphone",
@@ -276,7 +254,6 @@ private fun VisualIndicators(
 
         Spacer(modifier = Modifier.width(32.dp))
 
-        // Processing indicator
         Icon(
             imageVector = Icons.Default.Cloud,
             contentDescription = "Processing",
@@ -286,7 +263,6 @@ private fun VisualIndicators(
 
         Spacer(modifier = Modifier.width(32.dp))
 
-        // Flash indicator
         Icon(
             imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
             contentDescription = "Flash",
@@ -295,7 +271,57 @@ private fun VisualIndicators(
         )
     }
 }
+@Composable
+private fun TranscribedTextDisplay(sttState: SttState, imageBytes: ByteArray?,) {
+    // Get the transcribed text from STT state
+    val displayText = when (sttState) {
+        is SttState.Result -> sttState.text
+        is SttState.Listening -> "..." // Show dots while listening
+        else -> "" // Empty when idle or error
+    }
 
+    // Only show if there's text
+    if (displayText.isNotEmpty()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "You said:",
+                fontSize = 16.sp,
+                color = Color.Gray,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // BIG ASS TEXT - What you actually said
+            Text(
+                text = displayText,
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF00E676), // Bright green
+                textAlign = TextAlign.Center,
+                lineHeight = 40.sp,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Text(
+                text = if(imageBytes == null) "NO CAPTURE" else "IMAGE CAPTURED",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF00E676), // Bright green
+                textAlign = TextAlign.Center,
+                lineHeight = 40.sp,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    } else {
+        // Placeholder when nothing to show
+        Box(modifier = Modifier.height(100.dp))
+    }
+}
 @Composable
 private fun ButtonGuide() {
     Column(
@@ -303,71 +329,34 @@ private fun ButtonGuide() {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "Button Guide",
+            text = "Push-to-Talk Controls",
             fontSize = 14.sp,
-            color = Color.Gray,
+            color = Color(0xFF4CAF50),
             fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Text("Vol↑: Talk  |  Long: Photo", fontSize = 12.sp, color = Color.Gray)
-        Text("Vol↓: Stop  |  Long: Flash", fontSize = 12.sp, color = Color.Gray)
+        Text("Vol↑: Hold to Speak, Release to Send", fontSize = 12.sp, color = Color.Gray)
+        Text("Vol↓: Hold 2s to Take Photo", fontSize = 12.sp, color = Color.Gray)
     }
 }
-
-// ==================== VOLUME BUTTON HANDLER ====================
-
-//@Composable
-//private fun VolumeButtonHandler(
-//    activity: ComponentActivity?,
-//    enabled: Boolean,
-//    onVolumeUp: (isLongPress: Boolean) -> Unit,
-//    onVolumeDown: (isLongPress: Boolean) -> Unit
-//) {
-//    DisposableEffect(enabled) {
-//        if (activity == null || !enabled) return@DisposableEffect onDispose {}
-//
-//        val callback = object : ComponentActivity.OnKeyEventListener {
-//            override fun onKeyEvent(event: KeyEvent): Boolean {
-//                if (!enabled) return false
-//
-//                // Only handle key down events
-//                if (event.action != KeyEvent.ACTION_DOWN) return false
-//
-//                return when (event.keyCode) {
-//                    KeyEvent.KEYCODE_VOLUME_UP -> {
-//                        onVolumeUp(event.isLongPress)
-//                        true // Consume event to prevent volume change
-//                    }
-//                    KeyEvent.KEYCODE_VOLUME_DOWN -> {
-//                        onVolumeDown(event.isLongPress)
-//                        true // Consume event
-//                    }
-//                    else -> false
-//                }
-//            }
-//        }
-//
-//        activity.addOnKeyEventListener(callback)
-//
-//        onDispose {
-//            activity.removeOnKeyEventListener(callback)
-//        }
-//    }
-//}
 
 // ==================== VIBRATION PATTERNS ====================
 
 private enum class VibrationPattern(val timings: LongArray, val amplitudes: IntArray) {
-    SHORT_PRESS(
-        timings = longArrayOf(0, 50),
-        amplitudes = intArrayOf(0, 100)
+    START_LISTENING(
+        timings = longArrayOf(0, 50), // Short beep - listening started
+        amplitudes = intArrayOf(0, 120)
+    ),
+    STOP_LISTENING(
+        timings = longArrayOf(0, 30), // Even shorter - stopped listening
+        amplitudes = intArrayOf(0, 80)
     ),
     LONG_PRESS(
-        timings = longArrayOf(0, 100, 50, 100),
+        timings = longArrayOf(0, 100, 50, 100), // Double pulse - action triggered
         amplitudes = intArrayOf(0, 150, 0, 150)
     ),
     ACTION_CONFIRM(
-        timings = longArrayOf(0, 30),
+        timings = longArrayOf(0, 30), // Tiny blip - confirmation
         amplitudes = intArrayOf(0, 80)
     )
 }
@@ -383,30 +372,3 @@ private fun vibrate(context: Context, pattern: VibrationPattern) {
         vibrator.vibrate(pattern.timings, -1)
     }
 }
-
-// ==================== ALTERNATIVE: If ComponentActivity approach doesn't work ====================
-// You can also handle volume buttons in your Activity's dispatchKeyEvent:
-
-/*
-// In your MainActivity.kt:
-
-override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-    // Check if we're in accessibility mode
-    val isAccessibilityMode = // Get from ViewModel or shared state
-
-    if (isAccessibilityMode && event.action == KeyEvent.ACTION_DOWN) {
-        when (event.keyCode) {
-            KeyEvent.KEYCODE_VOLUME_UP -> {
-                // Handle volume up
-                return true
-            }
-            KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                // Handle volume down
-                return true
-            }
-        }
-    }
-
-    return super.dispatchKeyEvent(event)
-}
-*/

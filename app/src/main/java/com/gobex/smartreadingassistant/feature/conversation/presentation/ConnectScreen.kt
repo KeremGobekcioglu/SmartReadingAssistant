@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -45,6 +46,7 @@ fun ConnectScreen(
         }
     }
     if (permissionsState.allPermissionsGranted) {
+        val isBluetoothEnabled by viewModel.isBluetoothEnabled.collectAsStateWithLifecycle()
         val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
         val isConnected by viewModel.isDeviceConnected.collectAsStateWithLifecycle()
         val assignedIp by viewModel.assignedIp.collectAsStateWithLifecycle()
@@ -69,7 +71,9 @@ fun ConnectScreen(
                 )
 
                 Spacer(modifier = Modifier.height(48.dp))
-
+                if (!isBluetoothEnabled) {
+                    BluetoothDisabledWarning()
+                }
                 // 1. Success State: Show IP and Navigation Button
                 if (isConnected && assignedIp != null) {
                     Icon(
@@ -110,7 +114,8 @@ fun ConnectScreen(
                 else {
                     Button(
                         onClick = { viewModel.connectToSmartGlasses() },
-                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        isBluetoothEnabled
                     ) {
                         Text("Connect Glasses", fontSize = 18.sp)
                     }
@@ -139,6 +144,40 @@ fun ConnectScreen(
             Spacer(modifier = Modifier.height(8.dp))
             Button(onClick = { permissionsState.launchMultiplePermissionRequest() }) {
                 Text("Grant Permissions")
+            }
+        }
+    }
+}
+
+@Composable
+fun BluetoothDisabledWarning() {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer
+        ),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.BluetoothDisabled,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error
+            )
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(
+                    "Bluetooth is Off",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+                Text(
+                    "Please turn on Bluetooth to find your glasses.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
             }
         }
     }

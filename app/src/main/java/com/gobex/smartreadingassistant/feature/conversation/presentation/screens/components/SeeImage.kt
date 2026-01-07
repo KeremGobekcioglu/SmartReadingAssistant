@@ -1,6 +1,7 @@
 package com.gobex.smartreadingassistant.feature.conversation.presentation.screens.components
 
 import android.graphics.BitmapFactory
+import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,10 +20,17 @@ import androidx.compose.ui.window.DialogProperties
 @Composable
 fun CapturedImageDialog(
     imageBytes: ByteArray?,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    showDialog: Boolean
 ) {
-    if (imageBytes == null) return
+    Log.d("DIALOG_COMPOSABLE", "showDialog=$showDialog, hasImage=${imageBytes != null}")
 
+    if (imageBytes == null || !showDialog) {
+        Log.d("DIALOG_COMPOSABLE", "Not showing - returning early")
+        return
+    }
+
+    Log.d("DIALOG_COMPOSABLE", "Rendering dialog")
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)

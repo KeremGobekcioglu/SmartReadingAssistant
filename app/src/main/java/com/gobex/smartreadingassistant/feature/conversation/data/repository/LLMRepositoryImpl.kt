@@ -53,97 +53,105 @@ class LLMRepositoryImpl @Inject constructor(
         modelId: String,
         imageBase64: String?,
         conversationHistory: List<Message>
-    ): Flow<StreamResult>  = flow { // This flow will start the coroutine stream
+    ): Flow<StreamResult> = flow {
         try {
-            // Adding user message to local db so that even if api fails , we can see it.
-            val userMessage = Message   (
+            var currentFileUri: String? = null
+
+            // ✅ Step 1: Determine which image URI to use
+            if (imageBase64 != null) {
+                // We have Base64 - check if already uploaded
+                val existingMessage = conversationHistory.findLast {
+                    it.imageBase64 == imageBase64 && it.fileUri != null
+                }
+
+                if (existingMessage != null) {
+                    currentFileUri = existingMessage.fileUri
+                    Log.d("LLMREPOSITORYIMPL", "♻️ REUSING URI (matched Base64): $currentFileUri")
+                } else {
+                    // Upload new image
+                    Log.d("LLMREPOSITORYIMPL", "📤 Uploading new image...")
+                    val imageBytes = android.util.Base64.decode(imageBase64, android.util.Base64.DEFAULT)
+                    currentFileUri = uploadImageToGemini(imageBytes)
+
+                    if (currentFileUri != null) {
+                        Log.d("LLMREPOSITORYIMPL", "✅ Upload successful: $currentFileUri")
+                    } else {
+                        Log.e("LLMREPOSITORYIMPL", "❌ Upload failed!")
+                    }
+                }
+            } else {
+                // No Base64 provided - check if last message has an image URI we should include
+                val lastImageMessage = conversationHistory.findLast {
+                    it.role == MessageRole.USER && it.fileUri != null
+                }
+
+                if (lastImageMessage != null) {
+                    currentFileUri = lastImageMessage.fileUri
+                    Log.d("LLMREPOSITORYIMPL", "♻️ REUSING URI from conversation history: $currentFileUri")
+                }
+            }
+
+            // ✅ Step 2: Create and save user message
+            val userMessage = Message(
                 role = MessageRole.USER,
                 text = message,
                 imageBase64 = imageBase64,
+                fileUri = currentFileUri,
                 timestamp = System.currentTimeMillis()
             )
             localDb.addMessage(userMessage)
-            var currentFileUri : String? = null
+            Log.d("LLMREPOSITORYIMPL", "💾 User message saved with URI: $currentFileUri")
 
-            val existingMessage = conversationHistory.lastOrNull {
-                it.imageBase64 == imageBase64 && it.fileUri != null
-            }
-            // if we have an media to upload , i have to check it. also we need its uri so that we dont resend.
-            if (existingMessage != null) {
-                // Reuse existing URI
-                currentFileUri = existingMessage.fileUri
-                Log.d("LLMREPOSITORYIMPL", "Reusing existing URI: $currentFileUri")
-            } else if (imageBase64 != null) {
-                // Upload new image
-                val imageBytes = android.util.Base64.decode(imageBase64, android.util.Base64.DEFAULT)
-                currentFileUri = uploadImageToGemini(imageBytes)
-
-                // ✅ Update the message with the URI
-                if (currentFileUri != null) {
-                    val updatedMessage = userMessage.copy(fileUri = currentFileUri)
-//                    localDb.updateMessage(updatedMessage)
-                }
-                Log.d("LLMREPOSITORYIMPL", "Image uploaded. URI: $currentFileUri")
-            }
-            // B: Now our coversation will be turn to our dtos to upload.
-            val contents = conversationHistory.map {
-                domainMessage -> mapToContent(domainMessage)
+            // ✅ Step 3: Build API request
+            val contents = conversationHistory.map { domainMessage ->
+                mapToContent(domainMessage)
             }.toMutableList()
 
             val currentParts = mutableListOf<PartDto>()
-            // if we uplaod image ..
-            // Add image ONLY if upload succeeded
+
+            // Add image if we have a URI
             if (currentFileUri != null) {
-                Log.d("LLMREPOSITORYIMPL", "Using uploaded file URI: $currentFileUri")
+                Log.d("LLMREPOSITORYIMPL", "📎 Including image URI in API request")
                 currentParts.add(PartDto(fileData = FileDataRequestDto("image/jpeg", currentFileUri)))
-            }
-            // Fallback to Base64 only if upload failed AND Base64 is available
-            else if(imageBase64 != null) {
-                Log.d("LLMREPOSITORYIMPL", "Upload failed, using Base64 fallback")
+            } else if (imageBase64 != null) {
+                Log.d("LLMREPOSITORYIMPL", "⚠️ Fallback to Base64 (upload failed)")
                 currentParts.add(PartDto(inlineData = InlineDataDto("image/jpeg", imageBase64)))
             }
+
             currentParts.add(PartDto(text = message))
-            contents.add(ContentDto(role = "user" , parts = currentParts))
+            contents.add(ContentDto(role = "user", parts = currentParts))
 
             val requestDto = GeminiRequestDto(contents = contents)
 
-            // PHASE 2: Call or request
-                val responseBody = apiService.streamGenerateContent(
-                    model = modelId,
-                    apiKey = Constants.API_KEY,
-                    request = requestDto
-                )
+            // ✅ Step 4: Call API
+            val responseBody = apiService.streamGenerateContent(
+                model = modelId,
+                apiKey = Constants.API_KEY,
+                request = requestDto
+            )
+
             val fullResponse = StringBuilder()
-            var usageMetadata : UsageMetadataDto? = null
-            // Im opening the stream here
-// ✅ FIXED: Unbuffered streaming
+            var usageMetadata: UsageMetadataDto? = null
+
+            // ✅ Step 5: Stream response
             responseBody.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
                 try {
                     while (true) {
-                        val line = reader.readLine() ?: break // null = end of stream
+                        val line = reader.readLine() ?: break
                         val trimmed = line.trim()
-
-                        Log.d("LLMREPOSITORYIMPL", "🔍 Raw line: $trimmed") // Debug log
 
                         if (trimmed.startsWith("data: ")) {
                             val jsonData = trimmed.substring(6)
 
                             if (jsonData.isNotBlank() && jsonData != "[DONE]") {
                                 try {
-                                    Log.d("LLMREPOSITORYIMPL", "⏱️ Parsing at ${System.currentTimeMillis()}")
-
                                     val chunk = gson.fromJson(jsonData, GeminiResponseDto::class.java)
                                     val textChunk = chunk.candidates?.firstOrNull()
                                         ?.content?.parts?.firstOrNull()?.text
 
                                     if (textChunk != null) {
-                                        Log.d("LLMREPOSITORYIMPL", "📤 Emitting: '$textChunk'")
                                         fullResponse.append(textChunk)
-
-                                        // 🔥 Emit immediately - don't wait!
                                         emit(StreamResult.Chunk(textChunk))
-
-                                        Log.d("LLMREPOSITORYIMPL", "✅ Emitted at ${System.currentTimeMillis()}")
                                     }
 
                                     if (chunk.usageMetadata != null) {
@@ -160,23 +168,28 @@ class LLMRepositoryImpl @Inject constructor(
                     throw e
                 }
             }
+
+            // ✅ Step 6: Save assistant response
             val domainMetadata = usageMetadata?.toDomain()
-            Log.d("LLMREPOSITORYIMPL", "✅ Domain metadata: $domainMetadata")
             val fullMessage = Message(
                 role = MessageRole.ASSISTANT,
                 text = fullResponse.toString(),
                 timestamp = System.currentTimeMillis(),
                 totalTokenCount = domainMetadata?.totalTokenCount
             )
-            Log.d("LLMREPOSITORYIMPL", "✅ Full message created with tokens: ${fullMessage.totalTokenCount}")
+
             localDb.addMessage(fullMessage)
 
-            emit(StreamResult.Complete(fullMessage = fullMessage, metadata = domainMetadata))
-            }
+            // ✅ Step 7: Return URI to ViewModel
+            emit(StreamResult.Complete(
+                fullMessage = fullMessage,
+                metadata = domainMetadata,
+                uploadedFileUri = currentFileUri
+            ))
 
-        catch(e : Exception){
+        } catch (e: Exception) {
             emit(StreamResult.Error(e))
-            Log.d("LLMREPOSITORYIMPL" , "STREAM MESSAGE CATCH BLOCK")
+            Log.e("LLMREPOSITORYIMPL", "❌ ERROR: ${e.message}", e)
         }
     }.flowOn(Dispatchers.IO)
 
@@ -233,20 +246,24 @@ class LLMRepositoryImpl @Inject constructor(
         return result.trim()
     }
 
-    private fun mapToContent(message : Message) : ContentDto
-    {
-        // we ll get
+    private fun mapToContent(message: Message): ContentDto {
         val parts = mutableListOf<PartDto>()
+
+        // ✅ FIXED: Prioritize URI over Base64 - only use one!
         if (message.fileUri != null) {
+            // We have a URI - use it and skip Base64
             parts.add(PartDto(fileData = FileDataRequestDto("image/jpeg", message.fileUri)))
+            Log.d("LLMREPOSITORYIMPL", "📎 mapToContent: Using URI (skipping Base64)")
+        } else if (message.imageBase64 != null) {
+            // No URI but have Base64 - use Base64
+            parts.add(PartDto(inlineData = InlineDataDto("image/jpeg", message.imageBase64)))
+            Log.d("LLMREPOSITORYIMPL", "📦 mapToContent: Using Base64 (no URI available)")
         }
-        else if(message.imageBase64 != null)
-        {
-            parts.add(PartDto(inlineData = InlineDataDto("image/jpeg" , message.imageBase64)))
-        }
+
+        // Always add text
         parts.add(PartDto(text = message.text))
 
-        val apiRole = if(message.role == MessageRole.USER) "user" else "model"
+        val apiRole = if (message.role == MessageRole.USER) "user" else "model"
         return ContentDto(role = apiRole, parts = parts)
     }
 }

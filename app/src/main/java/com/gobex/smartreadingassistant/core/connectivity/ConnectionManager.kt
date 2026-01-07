@@ -40,8 +40,28 @@ class DeviceConnectionManager @Inject constructor(
     // Observe active connection from database
     val activeConnection: Flow<DeviceConnectionEntity?> =
         connectionDao.getActiveConnectionFlow()
+    private val bluetoothAdapter: android.bluetooth.BluetoothAdapter? by lazy {
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
+        manager.adapter
+    }
 
+    private val _isBluetoothEnabled = MutableStateFlow(bluetoothAdapter?.isEnabled == true)
+    val isBluetoothEnabled = _isBluetoothEnabled.asStateFlow()
+
+    private val bluetoothReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(
+                    android.bluetooth.BluetoothAdapter.EXTRA_STATE,
+                    android.bluetooth.BluetoothAdapter.ERROR
+                )
+                _isBluetoothEnabled.value = (state == android.bluetooth.BluetoothAdapter.STATE_ON)
+            }
+        }
+    }
     init {
+        val filter = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+        context.registerReceiver(bluetoothReceiver, filter)
         // Try to reconnect to last active connection on app start
         CoroutineScope(Dispatchers.IO).launch {
             attemptReconnectToSavedConnection()
@@ -75,6 +95,10 @@ class DeviceConnectionManager @Inject constructor(
     }
 
     suspend fun connect() {
+        if (!_isBluetoothEnabled.value) {
+            _state.value = ConnectionState.Error("Bluetooth is disabled. Please enable it to connect.")
+            return
+        }
         val serviceIntent = Intent(context, HotspotService::class.java)
         context.startService(serviceIntent)
 
@@ -162,6 +186,14 @@ class DeviceConnectionManager @Inject constructor(
         } else {
             connectionDao.deactivateAll()
             _state.value = ConnectionState.Disconnected
+        }
+    }
+    // Call this if the app is shutting down or if this wasn't a Singleton
+    fun teardown() {
+        try {
+            context.unregisterReceiver(bluetoothReceiver)
+        } catch (e: Exception) {
+            // Already unregistered
         }
     }
 }

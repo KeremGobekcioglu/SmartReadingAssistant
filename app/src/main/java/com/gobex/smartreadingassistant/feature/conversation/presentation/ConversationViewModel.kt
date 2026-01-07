@@ -74,7 +74,12 @@ class ConversationViewModel @Inject constructor(
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = "Ready to Connect"
     )
-
+    val isBluetoothEnabled: StateFlow<Boolean> = connectionManager.isBluetoothEnabled
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = true // Assume true until the first check
+        )
     val isDeviceConnected: StateFlow<Boolean> = connectionManager.state.map { state ->
         state is DeviceConnectionManager.ConnectionState.Connected
     }.stateIn(
@@ -132,7 +137,7 @@ class ConversationViewModel @Inject constructor(
             }
         }
     }
-
+    // Add a function to just hide the dialog
     // 2. Audio Control Methods
     fun startListening() {
         ttsManager.stop() // Stop TTS if user wants to speak
@@ -161,7 +166,51 @@ class ConversationViewModel @Inject constructor(
     // ====================================================================================
     //                                  HARDWARE CAPTURE
     // ====================================================================================
+    fun captureImageOnly() = viewModelScope.launch {
+        announceState(AppState.Capturing("Capturing photo"))
+        _state.update {
+            it.copy(
+                isStreaming = true,
+                currentText = "Capturing photo...",
+                currentImageUri = null  // ✅ Clear old URI when taking new photo
+            )
+        }
 
+        val result = deviceRepository.captureImage()
+
+        result.onSuccess { imageBytes ->
+            _state.update {
+                it.copy(
+                    capturedImageBytes = imageBytes,
+                    isStreaming = false,
+                    isImageDialogVisible = true,
+                    currentText = "",
+                    currentImageUri = null  // ✅ Reset URI for new image
+                )
+            }
+            announceAction("Photo captured. What would you like to know about it?")
+            delay(2500)
+        }
+
+        result.onFailure {
+            announceState(AppState.Error("Capture failed: ${it.message}"))
+            _state.update { it.copy(isStreaming = false, currentText = "") }
+            _uiEffect.send(ConversationEffect.ShowError("Capture Failed: ${it.message}"))
+        }
+    }
+
+    // Update clearCapturedImage
+    fun clearCapturedImage() {
+        _state.update {
+            it.copy(
+                capturedImageBytes = null,
+                currentImageUri = null  // ✅ Clear URI too
+            )
+        }
+        if (_state.value.isVoiceAnnouncementsEnabled) {
+            announceAction("Image cleared", withHaptic = false)
+        }
+    }
     fun captureAndAnalyze() = viewModelScope.launch {
 //            if (!_isDeviceConnected.value && _assignedIp.value == null) {
 //                _uiEffect.send(ConversationEffect.ShowError("Glasses not connected"))
@@ -175,7 +224,11 @@ class ConversationViewModel @Inject constructor(
 
         result.onSuccess { imageBytes ->
             announceState(AppState.Capturing("Photo captured, analyzing"))
-            _state.update { it.copy(capturedImageBytes = imageBytes) }
+            _state.update { it.copy(capturedImageBytes = imageBytes , isImageDialogVisible = true,) }
+
+            delay(2500)  // Wait for dialog to close first
+
+            _state.update { it.copy(isImageDialogVisible = false) }  // Hide dialog
             // 2. Convert to Base64
             val base64 =
                 android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP)
@@ -232,37 +285,37 @@ class ConversationViewModel @Inject constructor(
     ) {
         val speechBuffer = StringBuilder()
         try {
-            // This opens a pipe to llm api.
-            // We use collect since it is a flow and flow keeps returning data over and over.
             repository.streamMessage(
                 message = text,
                 conversationHistory = messages,
                 imageBase64 = imageBase64,
             ).collect { result ->
                 when (result) {
-                    is StreamResult.Error -> {
-                        _state.update { it.copy(isStreaming = false) }
-                        _uiEffect.send(
-                            ConversationEffect.ShowError(
-                                result.exception.message ?: "An error occured"
-                            )
-                        )
-                    }
-
                     is StreamResult.Complete -> {
-                        // in here we copy the old list and add the final message to it.
                         if (speechBuffer.isNotEmpty()) {
                             ttsManager.speak(speechBuffer.toString())
                             speechBuffer.clear()
                         }
-                        Log.d("VIEWMODAL PROCESS STREAM","AI RESPONSE : ${result.fullMessage}")
+
+                        // ✅ Save the URI if image was uploaded
+                        if (result.uploadedFileUri != null) {
+                            Log.d("VIEWMODEL", "💾 Received URI from repository: ${result.uploadedFileUri}")
+                            _state.update {
+                                Log.d("VIEWMODEL", "💾 Saving URI to state...")
+                                it.copy(currentImageUri = result.uploadedFileUri)
+                            }
+                            Log.d("VIEWMODEL", "💾 URI saved. Current state URI: ${_state.value.currentImageUri}")
+                        } else {
+                            Log.d("VIEWMODEL", "⚠️ No URI received from repository")
+                        }
+
                         _state.update { state ->
                             val updatedList = state.messages.toMutableList()
                             updatedList.add(result.fullMessage)
                             state.copy(
-                                messages = updatedList, // we save the new list
+                                messages = updatedList,
                                 isStreaming = false,
-                                currentText = "" // we clear the buffer
+                                currentText = ""
                             )
                         }
                     }
@@ -271,26 +324,29 @@ class ConversationViewModel @Inject constructor(
                         _state.update { state ->
                             state.copy(currentText = state.currentText + result.text)
                         }
-                        // B. Buffer for Audio (Wait for sentence)
                         speechBuffer.append(result.text)
-//                            checkForSentenceAndSpeak(speechBuffer)
                         if (result.text.contains(" ") || result.text.contains("\n")) {
                             val wordToSpeak = speechBuffer.toString()
                             if (wordToSpeak.isNotBlank()) {
                                 ttsManager.speak(wordToSpeak)
-                                speechBuffer.clear() // Clear so we don't repeat words
+                                speechBuffer.clear()
                             }
                         }
+                    }
+
+                    is StreamResult.Error -> {
+                        _state.update { it.copy(isStreaming = false) }
+                        _uiEffect.send(
+                            ConversationEffect.ShowError(
+                                result.exception.message ?: "An error occurred"
+                            )
+                        )
                     }
                 }
             }
         } catch (e: Exception) {
             _state.update { it.copy(isStreaming = false) }
-            _uiEffect.send(
-                ConversationEffect.ShowError(
-                    e.localizedMessage ?: "Connection failed"
-                )
-            )
+            _uiEffect.send(ConversationEffect.ShowError(e.localizedMessage ?: "Connection failed"))
         }
     }
 
@@ -397,11 +453,13 @@ class ConversationViewModel @Inject constructor(
      */
     private fun handleVoiceCommand(text: String) {
         val command = VoiceCommandParser.parse(text)
+//        _state.update { it.copy(isImageDialogVisible = false) }
         Log.d("VIEWMODAL HANDLE VOICE COMMAND" , "STT TEXT IS THIS : $text")
         when (command) {
             is VoiceCommand.CapturePhoto -> {
                 announceAction("Capturing photo")
-                captureAndAnalyze()
+//                captureAndAnalyze()
+                captureImageOnly()
             }
 
             is VoiceCommand.ToggleFlash -> {
@@ -426,15 +484,43 @@ class ConversationViewModel @Inject constructor(
 
             is VoiceCommand.ClearConversation -> {
                 clearConversation()
+                clearCapturedImage()
                 announceAction("Conversation cleared")
             }
 
             is VoiceCommand.SendToAI -> {
-                // Not a command - send to Gemini
-                val imageBase64 = _state.value.capturedImageBytes?.let {
-                    Base64.encodeToString(it, Base64.NO_WRAP)
+                _state.update { it.copy(isImageDialogVisible = false) }
+
+                // ✅ Smart image handling: Reuse URI if available
+                val currentUri = _state.value.currentImageUri
+                val imageBytes = _state.value.capturedImageBytes
+
+                Log.d("VoiceCommand", "=== IMAGE STATE CHECK ===")
+                Log.d("VoiceCommand", "currentUri: $currentUri")
+                Log.d("VoiceCommand", "imageBytes: ${imageBytes?.size ?: "null"}")
+                Log.d("VoiceCommand", "========================")
+
+                when {
+                    // Case 1: We have a URI from previous upload - DON'T send Base64
+                    currentUri != null -> {
+                        Log.d("VoiceCommand", "♻️ Reusing existing URI: $currentUri")
+                        announceAction("Processing your question")
+                        // Send text only, URI will be found in conversation history
+                        sendPrompt(command.text, null)
+                    }
+                    // Case 2: We have image bytes but no URI yet - first question
+                    imageBytes != null -> {
+                        Log.d("VoiceCommand", "📤 First question with image, will upload")
+                        announceAction("Processing your question with the captured image")
+                        val imageBase64 = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+                        sendPrompt(command.text, imageBase64)
+                    }
+                    // Case 3: No image at all
+                    else -> {
+                        Log.d("VoiceCommand", "💬 Text-only question")
+                        sendPrompt(command.text, null)
+                    }
                 }
-                sendPrompt(command.text, imageBase64)
             }
         }
     }
@@ -452,10 +538,6 @@ class ConversationViewModel @Inject constructor(
         } else {
             announceAction("No previous response to repeat")
         }
-    }
-
-    fun clearImagePreview() {
-        _state.update { it.copy(capturedImageBytes = null) }
     }
 
     fun clearConversation() = viewModelScope.launch {
@@ -543,13 +625,20 @@ class ConversationViewModel @Inject constructor(
         super.onCleared()
         ttsManager.shutdown()
     }
+    fun dismissImageDialog() {
+        val before = _state.value.isImageDialogVisible
+        Log.d("VIEWMODEL_DISMISS", "BEFORE: $before")
 
+        val newState = _state.value.copy(isImageDialogVisible = false)
+        Log.d("VIEWMODEL_DISMISS", "NEW STATE CREATED: ${newState.isImageDialogVisible}")
+
+        _state.value = newState
+
+        val after = _state.value.isImageDialogVisible
+        Log.d("VIEWMODEL_DISMISS", "AFTER: $after")
+    }
     fun setImageBytes(bytes: ByteArray?) {
         _state.update { it.copy(capturedImageBytes = bytes) }
-    }
-
-    fun clearImage() {
-        _state.update { it.copy(capturedImageBytes = null) }
     }
 }
 
