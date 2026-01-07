@@ -15,6 +15,8 @@ interface SpeechToTextManager {
     val state: Flow<SttState>
     fun startListening()
     fun stopListening()
+
+    fun resetState()
 }
 
 // TTS Interface

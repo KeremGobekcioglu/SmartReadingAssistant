@@ -115,6 +115,7 @@ dependencies {
     implementation(libs.androidx.room.ktx) // For Kotlin extensions and Coroutines support
     ksp(libs.androidx.room.compiler) // KSP for annotation processing
     implementation("androidx.compose.material:material-icons-extended")
+    implementation("com.google.mlkit:language-id:17.0.5")
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

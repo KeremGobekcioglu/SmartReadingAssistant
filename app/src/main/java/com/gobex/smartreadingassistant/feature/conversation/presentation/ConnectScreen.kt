@@ -21,7 +21,8 @@ import com.google.accompanist.permissions.rememberMultiplePermissionsState
 @Composable
 fun ConnectScreen(
     viewModel: ConversationViewModel,
-    onNavigateToChat: () -> Unit
+    onNavigateToChat: () -> Unit,
+    onNavigateToAccessibleChat: () -> Unit
 ) {
     val permissionsState = rememberMultiplePermissionsState(
         permissions = buildList {
@@ -89,6 +90,14 @@ fun ConnectScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
                     ) {
                         Text("Start Chatting", fontSize = 18.sp)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = onNavigateToAccessibleChat,
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6200EE))
+                    ) {
+                        Text("Start Accessible Chatting.", fontSize = 18.sp)
                     }
                 }
                 // 2. Loading State

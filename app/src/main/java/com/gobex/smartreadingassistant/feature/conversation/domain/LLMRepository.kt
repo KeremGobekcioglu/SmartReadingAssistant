@@ -11,7 +11,7 @@ interface LLMRepository {
     suspend fun getConversationHistory(): List<Message>
     suspend fun streamMessage(
         message: String,
-        modelId: String = "gemini-2.5-flash", // Default
+        modelId: String = "gemini-2.5-flash-lite", // Default
         imageBase64: String? = null,
         conversationHistory: List<Message>
     ): Flow<StreamResult>

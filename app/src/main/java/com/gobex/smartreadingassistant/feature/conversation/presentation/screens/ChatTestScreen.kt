@@ -60,9 +60,31 @@ fun ChatTestScreen(
     LaunchedEffect(Unit) {
         viewModel.uiEffect.collectLatest { effect ->
             when (effect) {
-                is ConversationEffect.ShowError -> Toast.makeText(context, "Error: ${effect.message}", Toast.LENGTH_LONG).show()
-                is ConversationEffect.SpeakText -> Toast.makeText(context, "TTS: ${effect.text.take(50)}...", Toast.LENGTH_SHORT).show()
-                is ConversationEffect.NavigateToChat -> Toast.makeText(context, "NP" , Toast.LENGTH_SHORT).show()
+                is ConversationEffect.ShowError -> {
+                    Toast.makeText(context, "Error: ${effect.message}", Toast.LENGTH_LONG).show()
+                }
+                is ConversationEffect.SpeakText -> {
+                    Toast.makeText(context, "TTS: ${effect.text.take(50)}...", Toast.LENGTH_SHORT).show()
+                }
+                is ConversationEffect.NavigateToChat -> {
+                    // Already handled by the navigation button, but good to keep for safety
+                }
+
+                // Handle the new accessibility effects
+                is ConversationEffect.AnnounceAction -> {
+//                    if (effect.withHaptic) {
+//                        vibrate(context, VibrationPattern.ACTION_CONFIRM)
+//                    }
+                    // The actual voice is handled by the ViewModel calling ttsManager.speak()
+                }
+
+                is ConversationEffect.AnnounceState -> {
+                    // You can add a specific vibration for state changes if you want
+                }
+
+                is ConversationEffect.PlaySound -> {
+                    // If you add sound files (beeps/clicks) later, trigger them here
+                }
             }
         }
     }
@@ -123,7 +145,8 @@ fun ChatTestScreen(
                 onCapturePhoto = { viewModel.captureAndAnalyze() },
                 sttState = sttState, // <--- Pass State
                 onStartListening = { viewModel.startListening() }, // <--- Pass Action
-                onStopListening = { viewModel.stopListening() },   // <--- Pass Action
+                onStopListening = { viewModel.stopListening() } ,   // <--- Pass Action
+                resetSttState = { viewModel.resetSttState() }
             )
         }
     ) { padding ->
@@ -156,7 +179,8 @@ fun DeveloperInputBar(
     onStartListening: () -> Unit,
     onStopListening: () -> Unit,
     onSend: (String, Uri?) -> Unit,
-    onCapturePhoto: () -> Unit
+    onCapturePhoto: () -> Unit,
+    resetSttState: () -> Unit
 ) {
     var text by remember { mutableStateOf("") }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
@@ -183,8 +207,17 @@ fun DeveloperInputBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             val isListening = sttState is SttState.Listening
+
             IconButton(
-                onClick = { if (isListening) onStopListening() else onStartListening() },
+                onClick = {
+                    if (isListening) {
+                        onStopListening()
+                    } else {
+                        // Clear text before starting to listen
+                        text = ""
+                        onStartListening()
+                    }
+                },
                 colors = IconButtonDefaults.iconButtonColors(
                     contentColor = if (isListening) Color.Red else MaterialTheme.colorScheme.primary
                 )
@@ -194,31 +227,36 @@ fun DeveloperInputBar(
                     contentDescription = "Voice Input"
                 )
             }
+
             IconButton(onClick = { launcher.launch("image/*") }) {
                 Icon(Icons.Default.AddPhotoAlternate, "Upload")
             }
-            // --- CAPTURE PHOTO BUTTON (ESP32 TRIGGER) ---
+
             IconButton(
                 onClick = onCapturePhoto,
                 enabled = !isStreaming
             ) {
                 Icon(Icons.Default.CameraAlt, "Capture from Glasses", tint = MaterialTheme.colorScheme.primary)
             }
+
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Simulate STT input...") },
-                maxLines = 3
+                placeholder = { Text("Type or use voice...") },
+                maxLines = 3,
+                enabled = !isListening // Disable text input while listening
             )
 
             IconButton(
                 onClick = {
-                    onSend(text, selectedUri)
-                    text = ""
-                    selectedUri = null
+                    if (text.isNotBlank() || selectedUri != null) {
+                        onSend(text, selectedUri)
+                        text = ""
+                        selectedUri = null
+                    }
                 },
-                enabled = !isStreaming && text.isNotBlank()
+                enabled = !isStreaming && !isListening && (text.isNotBlank() || selectedUri != null)
             ) {
                 if(isStreaming) CircularProgressIndicator(modifier = Modifier.size(24.dp))
                 else Icon(Icons.Default.Send, "Send")

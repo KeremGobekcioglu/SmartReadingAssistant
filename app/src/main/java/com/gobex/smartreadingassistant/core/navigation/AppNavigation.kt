@@ -8,6 +8,9 @@ sealed interface Route {
     @Serializable
     data object Chat : Route
 
+    @Serializable
+    data object AccessibleChat : Route
+
     // The Admin/History Dashboard
     @Serializable
     data object History : Route

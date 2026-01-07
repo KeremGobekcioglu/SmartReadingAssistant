@@ -35,18 +35,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import kotlin.jvm.java
-
+import android.util.Base64
+import android.util.Log
 
 // 1. The "Billboard": Persistent data the UI simply displays.
-    @HiltViewModel
-    class ConversationViewModel @Inject constructor(
+@HiltViewModel
+class ConversationViewModel @Inject constructor(
     private val repository: LLMRepository,
-        // IoT Dependencies
+    // IoT Dependencies
     private val connectionManager: DeviceConnectionManager,
     private val deviceRepository: DeviceRepository,
     private val sttManager: SpeechToTextManager,
     private val ttsManager: TextToSpeechManager
-    ) : ViewModel() {
+) : ViewModel() {
 
     // ==================== UI State ====================
     private val _state = MutableStateFlow(ConversionState())
@@ -57,7 +58,8 @@ import kotlin.jvm.java
     val uiEffect = _uiEffect.receiveAsFlow()
 
     // ==================== Connection State (Observe from Manager) ====================
-    val connectionState: StateFlow<DeviceConnectionManager.ConnectionState> = connectionManager.state
+    val connectionState: StateFlow<DeviceConnectionManager.ConnectionState> =
+        connectionManager.state
     val activeConnection = connectionManager.activeConnection
     val sttState = sttManager.state
     val connectionStatus: StateFlow<String> = connectionManager.state.map { state ->
@@ -88,29 +90,48 @@ import kotlin.jvm.java
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = null
     )
-        init {
-            loadHistory()
-            observeStt()
-        }
 
-        // ====================================================================================
-        //                                  IOT CONNECTION LOGIC
-        // ====================================================================================
-        // 1. Observe STT: When user finishes speaking, send to Gemini
-        private fun observeStt() = viewModelScope.launch {
-            sttManager.state.collect { sttState ->
-                when (sttState) {
-                    is SttState.Result -> {
-                        stopListening() // Ensure UI updates
-                        sendPrompt(sttState.text)
-                    }
-                    is SttState.Error -> {
-                        _uiEffect.send(ConversationEffect.ShowError(sttState.error))
-                    }
-                    else -> {}
+    init {
+        loadHistory()
+        observeSttWithCommands()
+    }
+
+    // ====================================================================================
+    //                                  IOT CONNECTION LOGIC
+    // ====================================================================================
+    // 1. Observe STT: When user finishes speaking, send to Gemini
+    private fun observeSttWithCommands() = viewModelScope.launch {
+        sttManager.state.collect { sttState ->
+            when (sttState) {
+                is SttState.Listening -> {
+                    announceState(AppState.Listening)
                 }
+
+                is SttState.Result -> {
+                    stopListening()
+                    announceState(AppState.Processing)
+
+                    // Parse for voice commands if in accessibility mode
+                    if (_state.value.isAccessibilityMode) {
+                        handleVoiceCommand(sttState.text)
+                    } else {
+                        // Regular mode - send directly to AI
+                        val imageBase64 = _state.value.capturedImageBytes?.let {
+                            Base64.encodeToString(it, Base64.NO_WRAP)
+                        }
+                        sendPrompt(sttState.text, imageBase64)
+                    }
+                }
+
+                is SttState.Error -> {
+                    announceState(AppState.Error(sttState.error))
+                    _uiEffect.send(ConversationEffect.ShowError(sttState.error))
+                }
+
+                else -> {}
             }
         }
+    }
 
     // 2. Audio Control Methods
     fun startListening() {
@@ -125,6 +146,7 @@ import kotlin.jvm.java
     fun stopSpeaking() {
         ttsManager.stop()
     }
+
     fun connectToSmartGlasses() = viewModelScope.launch {
         try {
             connectionManager.connect()
@@ -136,207 +158,367 @@ import kotlin.jvm.java
     fun disconnectFromSmartGlasses() = viewModelScope.launch {
         connectionManager.disconnect()
     }
-        // ====================================================================================
-        //                                  HARDWARE CAPTURE
-        // ====================================================================================
+    // ====================================================================================
+    //                                  HARDWARE CAPTURE
+    // ====================================================================================
 
-        fun captureAndAnalyze() = viewModelScope.launch {
+    fun captureAndAnalyze() = viewModelScope.launch {
 //            if (!_isDeviceConnected.value && _assignedIp.value == null) {
 //                _uiEffect.send(ConversationEffect.ShowError("Glasses not connected"))
 //                return@launch
 //            }
+        announceState(AppState.Capturing("Capturing photo"))
+        _state.update { it.copy(isStreaming = true, currentText = "Capturing photo...") }
 
-            _state.update { it.copy(isStreaming = true, currentText = "Capturing photo...") }
+        // 1. Capture from ESP32
+        val result = deviceRepository.captureImage()
 
-            // 1. Capture from ESP32
-            val result = deviceRepository.captureImage()
+        result.onSuccess { imageBytes ->
+            announceState(AppState.Capturing("Photo captured, analyzing"))
+            _state.update { it.copy(capturedImageBytes = imageBytes) }
+            // 2. Convert to Base64
+            val base64 =
+                android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP)
 
-            result.onSuccess { imageBytes ->
-
-                _state.update { it.copy(capturedImageBytes = imageBytes) }
-                // 2. Convert to Base64
-                val base64 =
-                    android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP)
-
-                // 3. Send to Gemini
-                _state.update { it.copy(currentText = "Analyzing text...") }
-                sendPrompt("Read this text for me.", base64)
-            }
-
-            result.onFailure {
-                _state.update { it.copy(isStreaming = false, currentText = "") }
-                _uiEffect.send(ConversationEffect.ShowError("Capture Failed: ${it.message}"))
-            }
+            // 3. Send to Gemini
+            _state.update { it.copy(currentText = "Analyzing text...") }
+            sendPrompt("Explain this image to me. What objects you detected, what is the context. If it contains text, extract it.", base64)
         }
 
-        fun toggleFlash(isOn: Boolean) = viewModelScope.launch {
-            deviceRepository.toggleFlash(isOn)
-            _state.update { it.copy(isFlashOn = isOn) }
+        result.onFailure {
+            announceState(AppState.Error("Capture failed: ${it.message}"))
+            _state.update { it.copy(isStreaming = false, currentText = "") }
+            _uiEffect.send(ConversationEffect.ShowError("Capture Failed: ${it.message}"))
         }
+    }
 
-        fun sendPrompt(text: String, imageBase64: String? = null) = viewModelScope.launch {
-            if (text.isBlank()) return@launch
+    fun toggleFlash(isOn: Boolean) = viewModelScope.launch {
+        deviceRepository.toggleFlash(isOn)
+        _state.update { it.copy(isFlashOn = isOn) }
+    }
 
-            // creating user message
-            val userMessage = Message(
-                role = MessageRole.USER,
-                text = text,
-                imageBase64 = imageBase64,
+    fun sendPrompt(text: String, imageBase64: String? = null) = viewModelScope.launch {
+        if (text.isBlank()) return@launch
+
+        // creating user message
+        val userMessage = Message(
+            role = MessageRole.USER,
+            text = text,
+            imageBase64 = imageBase64,
+        )
+        val currentMessages = _state.value.messages.toMutableList()
+        currentMessages.add(userMessage)
+
+        _state.update {
+            it.copy(
+                messages = currentMessages,
+                isStreaming = true,
+                currentText = ""
             )
-            val currentMessages = _state.value.messages.toMutableList()
-            currentMessages.add(userMessage)
-
-            _state.update {
-                it.copy(
-                    messages = currentMessages,
-                    isStreaming = true,
-                    currentText = ""
-                )
-            }
-
-            processStream(text, imageBase64, currentMessages)
         }
 
-        private suspend fun processStream(
-            text: String,
-            imageBase64: String? = null,
-            messages: List<Message>
-        ) {
-            val speechBuffer = StringBuilder()
-            try {
-                // This opens a pipe to llm api.
-                // We use collect since it is a flow and flow keeps returning data over and over.
-                repository.streamMessage(
-                    message = text,
-                    conversationHistory = messages,
-                    imageBase64 = imageBase64,
-                ).collect { result ->
-                    when (result) {
-                        is StreamResult.Error -> {
-                            _state.update { it.copy(isStreaming = false) }
-                            _uiEffect.send(
-                                ConversationEffect.ShowError(
-                                    result.exception.message ?: "An error occured"
-                                )
+        processStream(text, imageBase64, currentMessages)
+    }
+
+    fun resetSttState() {
+        // This stops the LaunchedEffect from seeing "Result" a second time
+        sttManager.resetState()
+    }
+
+    private suspend fun processStream(
+        text: String,
+        imageBase64: String? = null,
+        messages: List<Message>
+    ) {
+        val speechBuffer = StringBuilder()
+        try {
+            // This opens a pipe to llm api.
+            // We use collect since it is a flow and flow keeps returning data over and over.
+            repository.streamMessage(
+                message = text,
+                conversationHistory = messages,
+                imageBase64 = imageBase64,
+            ).collect { result ->
+                when (result) {
+                    is StreamResult.Error -> {
+                        _state.update { it.copy(isStreaming = false) }
+                        _uiEffect.send(
+                            ConversationEffect.ShowError(
+                                result.exception.message ?: "An error occured"
+                            )
+                        )
+                    }
+
+                    is StreamResult.Complete -> {
+                        // in here we copy the old list and add the final message to it.
+                        if (speechBuffer.isNotEmpty()) {
+                            ttsManager.speak(speechBuffer.toString())
+                            speechBuffer.clear()
+                        }
+                        Log.d("VIEWMODAL PROCESS STREAM","AI RESPONSE : ${result.fullMessage}")
+                        _state.update { state ->
+                            val updatedList = state.messages.toMutableList()
+                            updatedList.add(result.fullMessage)
+                            state.copy(
+                                messages = updatedList, // we save the new list
+                                isStreaming = false,
+                                currentText = "" // we clear the buffer
                             )
                         }
+                    }
 
-                        is StreamResult.Complete -> {
-                            // in here we copy the old list and add the final message to it.
-                            if (speechBuffer.isNotEmpty()) {
-                                ttsManager.speak(speechBuffer.toString())
-                                speechBuffer.clear()
-                            }
-                            _state.update { state ->
-                                val updatedList = state.messages.toMutableList()
-                                updatedList.add(result.fullMessage)
-                                state.copy(
-                                    messages = updatedList, // we save the new list
-                                    isStreaming = false,
-                                    currentText = "" // we clear the buffer
-                                )
-                            }
+                    is StreamResult.Chunk -> {
+                        _state.update { state ->
+                            state.copy(currentText = state.currentText + result.text)
                         }
-
-                        is StreamResult.Chunk -> {
-                            _state.update { state ->
-                                state.copy(currentText = state.currentText + result.text)
+                        // B. Buffer for Audio (Wait for sentence)
+                        speechBuffer.append(result.text)
+//                            checkForSentenceAndSpeak(speechBuffer)
+                        if (result.text.contains(" ") || result.text.contains("\n")) {
+                            val wordToSpeak = speechBuffer.toString()
+                            if (wordToSpeak.isNotBlank()) {
+                                ttsManager.speak(wordToSpeak)
+                                speechBuffer.clear() // Clear so we don't repeat words
                             }
-                            // B. Buffer for Audio (Wait for sentence)
-                            speechBuffer.append(result.text)
-                            checkForSentenceAndSpeak(speechBuffer)
                         }
                     }
                 }
-            } catch (e: Exception) {
-                _state.update { it.copy(isStreaming = false) }
-                _uiEffect.send(
-                    ConversationEffect.ShowError(
-                        e.localizedMessage ?: "Connection failed"
-                    )
+            }
+        } catch (e: Exception) {
+            _state.update { it.copy(isStreaming = false) }
+            _uiEffect.send(
+                ConversationEffect.ShowError(
+                    e.localizedMessage ?: "Connection failed"
+                )
+            )
+        }
+    }
+
+    private fun loadHistory() = viewModelScope.launch {
+        _state.update { it.copy(isLoadingHistory = true) }
+
+        try {
+            val messageHistory = repository.getConversationHistory()
+            _state.update {
+                it.copy(
+                    messages = messageHistory,
+                    isLoadingHistory = false
                 )
             }
+        } catch (e: Exception) {
+            _state.update { it.copy(isLoadingHistory = false) }
+            _uiEffect.send(ConversationEffect.ShowError(e.message))
+        }
+    }
+    // ===== Voice Announcement System =====
+
+    fun enableAccessibilityMode() {
+        _state.update { it.copy(isAccessibilityMode = true, isVoiceAnnouncementsEnabled = true) }
+        announceState(AppState.Idle)
+    }
+
+    fun disableAccessibilityMode() {
+        _state.update { it.copy(isAccessibilityMode = false, isVoiceAnnouncementsEnabled = false) }
+        ttsManager.stop()
+    }
+
+    fun enableVoiceAnnouncements() {
+        _state.update { it.copy(isVoiceAnnouncementsEnabled = true) }
+    }
+
+    fun disableVoiceAnnouncements() {
+        _state.update { it.copy(isVoiceAnnouncementsEnabled = false) }
+    }
+
+    /**
+     * Announces app state changes via TTS
+     * Only announces if voice announcements are enabled and state has changed
+     */
+    private fun announceState(newState: AppState) {
+        val currentState = _state.value
+
+        // Don't announce if disabled
+        if (!currentState.isVoiceAnnouncementsEnabled) return
+
+        // Don't announce same state twice
+        if (currentState.lastAnnouncedState == newState) return
+
+        // Update state
+        _state.update { it.copy(currentAppState = newState, lastAnnouncedState = newState) }
+
+        // Get announcement text
+        val announcement = newState.toAnnouncement()
+        if (announcement.isBlank()) return
+
+        // Interrupt current speech for high priority states
+        if (newState.priority() == AppState.Priority.HIGH) {
+            ttsManager.stop()
         }
 
-        private fun loadHistory() = viewModelScope.launch {
-            _state.update { it.copy(isLoadingHistory = true) }
+        // Speak announcement
+        viewModelScope.launch {
+            _uiEffect.send(ConversationEffect.AnnounceState(newState, interrupt = newState.priority() == AppState.Priority.HIGH))
+        }
 
-            try {
-                val messageHistory = repository.getConversationHistory()
-                _state.update {
-                    it.copy(
-                        messages = messageHistory,
-                        isLoadingHistory = false
-                    )
+        ttsManager.speak(announcement)
+    }
+
+    /**
+     * Announces a custom action message
+     */
+    fun announceAction(message: String, withHaptic: Boolean = true) {
+        if (!_state.value.isVoiceAnnouncementsEnabled) return
+
+        viewModelScope.launch {
+            _uiEffect.send(ConversationEffect.AnnounceAction(message, withHaptic))
+        }
+
+        ttsManager.speak(message)
+    }
+
+    /**
+     * Start monitoring connection state and announce changes
+     */
+    fun startConnectionAnnouncements() = viewModelScope.launch {
+        connectionManager.state.collect { state ->
+            val appState = when (state) {
+                is DeviceConnectionManager.ConnectionState.Disconnected -> AppState.Disconnected
+                is DeviceConnectionManager.ConnectionState.Connecting -> AppState.Connecting
+                is DeviceConnectionManager.ConnectionState.Connected -> AppState.Connected(state.ip)
+                is DeviceConnectionManager.ConnectionState.Error -> AppState.Error(state.message)
+            }
+            announceState(appState)
+        }
+    }
+
+
+    /**
+     * Handles voice commands or sends to AI
+     */
+    private fun handleVoiceCommand(text: String) {
+        val command = VoiceCommandParser.parse(text)
+        Log.d("VIEWMODAL HANDLE VOICE COMMAND" , "STT TEXT IS THIS : $text")
+        when (command) {
+            is VoiceCommand.CapturePhoto -> {
+                announceAction("Capturing photo")
+                captureAndAnalyze()
+            }
+
+            is VoiceCommand.ToggleFlash -> {
+                val newState = !_state.value.isFlashOn
+                toggleFlash(newState)
+                announceAction("Flash turned ${if (newState) "on" else "off"}")
+            }
+
+            is VoiceCommand.SetFlash -> {
+                toggleFlash(command.on)
+                announceAction("Flash turned ${if (command.on) "on" else "off"}")
+            }
+
+            is VoiceCommand.StopSpeaking -> {
+                stopSpeaking()
+                announceAction("Stopped", withHaptic = false)
+            }
+
+            is VoiceCommand.RepeatLast -> {
+                repeatLastResponse()
+            }
+
+            is VoiceCommand.ClearConversation -> {
+                clearConversation()
+                announceAction("Conversation cleared")
+            }
+
+            is VoiceCommand.SendToAI -> {
+                // Not a command - send to Gemini
+                val imageBase64 = _state.value.capturedImageBytes?.let {
+                    Base64.encodeToString(it, Base64.NO_WRAP)
                 }
-            } catch (e: Exception) {
-                _state.update { it.copy(isLoadingHistory = false) }
-                _uiEffect.send(ConversationEffect.ShowError(e.message))
+                sendPrompt(command.text, imageBase64)
             }
         }
+    }
+
+    /**
+     * Repeats the last AI response
+     */
+    private fun repeatLastResponse() {
+        val lastAssistantMessage = _state.value.messages
+            .lastOrNull { it.role == MessageRole.ASSISTANT }
+
+        if (lastAssistantMessage != null) {
+            announceAction("Repeating")
+            ttsManager.speak(lastAssistantMessage.text)
+        } else {
+            announceAction("No previous response to repeat")
+        }
+    }
+
     fun clearImagePreview() {
         _state.update { it.copy(capturedImageBytes = null) }
     }
-        fun clearConversation() = viewModelScope.launch {
+
+    fun clearConversation() = viewModelScope.launch {
 //        repository.clearConversation()
-            _state.update { it.copy(messages = emptyList()) }
-            _uiEffect.send(ConversationEffect.SpeakText("Conversation cleared"))
+        _state.update { it.copy(messages = emptyList()) }
+        _uiEffect.send(ConversationEffect.SpeakText("Conversation cleared"))
+    }
+
+    fun getUsageStats(): UsageStats {
+        val messages = _state.value.messages
+
+        // Count API requests (each USER message = 1 API call)
+        val totalApiCalls = messages.count { it.role == MessageRole.USER }
+
+        // Calculate today's requests (resets at midnight)
+        val todayStart = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+        val todayApiCalls = messages.count {
+            it.role == MessageRole.USER && it.timestamp >= todayStart
         }
 
-        fun getUsageStats(): UsageStats {
-            val messages = _state.value.messages
+        // Calculate token usage
+        val totalTokens = messages.sumOf { it.totalTokenCount ?: 0 }
+        val todayTokens = messages
+            .filter { it.timestamp >= todayStart }
+            .sumOf { it.totalTokenCount ?: 0 }
 
-            // Count API requests (each USER message = 1 API call)
-            val totalApiCalls = messages.count { it.role == MessageRole.USER }
+        // Separate input vs output tokens (ASSISTANT messages have the full count)
+        val inputTokens = messages
+            .filter { it.role == MessageRole.USER }
+            .sumOf { it.totalTokenCount ?: 0 }
 
-            // Calculate today's requests (resets at midnight)
-            val todayStart = java.util.Calendar.getInstance().apply {
-                set(java.util.Calendar.HOUR_OF_DAY, 0)
-                set(java.util.Calendar.MINUTE, 0)
-                set(java.util.Calendar.SECOND, 0)
-                set(java.util.Calendar.MILLISECOND, 0)
-            }.timeInMillis
+        val outputTokens = messages
+            .filter { it.role == MessageRole.ASSISTANT }
+            .sumOf { it.totalTokenCount ?: 0 }
 
-            val todayApiCalls = messages.count {
-                it.role == MessageRole.USER && it.timestamp >= todayStart
-            }
+        return UsageStats(
+            totalApiCalls = totalApiCalls,
+            todayApiCalls = todayApiCalls,
+            totalTokens = totalTokens,
+            todayTokens = todayTokens,
+            inputTokens = inputTokens,
+            outputTokens = outputTokens,
+            estimatedCost = calculateCost(inputTokens, outputTokens)
+        )
+    }
 
-            // Calculate token usage
-            val totalTokens = messages.sumOf { it.totalTokenCount ?: 0 }
-            val todayTokens = messages
-                .filter { it.timestamp >= todayStart }
-                .sumOf { it.totalTokenCount ?: 0 }
+    private fun calculateCost(inputTokens: Int, outputTokens: Int): Double {
+        // Gemini 2.5 Flash pricing
+        val inputCostPer1M = 0.075 // $0.075 per 1M input tokens
+        val outputCostPer1M = 0.30  // $0.30 per 1M output tokens
 
-            // Separate input vs output tokens (ASSISTANT messages have the full count)
-            val inputTokens = messages
-                .filter { it.role == MessageRole.USER }
-                .sumOf { it.totalTokenCount ?: 0 }
+        val inputCost = (inputTokens / 1_000_000.0) * inputCostPer1M
+        val outputCost = (outputTokens / 1_000_000.0) * outputCostPer1M
 
-            val outputTokens = messages
-                .filter { it.role == MessageRole.ASSISTANT }
-                .sumOf { it.totalTokenCount ?: 0 }
+        return inputCost + outputCost
+    }
 
-            return UsageStats(
-                totalApiCalls = totalApiCalls,
-                todayApiCalls = todayApiCalls,
-                totalTokens = totalTokens,
-                todayTokens = todayTokens,
-                inputTokens = inputTokens,
-                outputTokens = outputTokens,
-                estimatedCost = calculateCost(inputTokens, outputTokens)
-            )
-        }
-
-        private fun calculateCost(inputTokens: Int, outputTokens: Int): Double {
-            // Gemini 2.5 Flash pricing
-            val inputCostPer1M = 0.075 // $0.075 per 1M input tokens
-            val outputCostPer1M = 0.30  // $0.30 per 1M output tokens
-
-            val inputCost = (inputTokens / 1_000_000.0) * inputCostPer1M
-            val outputCost = (outputTokens / 1_000_000.0) * outputCostPer1M
-
-            return inputCost + outputCost
-        }
     // Helper: Looks for punctuation, speaks the sentence, removes it from buffer
     private fun checkForSentenceAndSpeak(buffer: StringBuilder) {
         val text = buffer.toString()
@@ -356,11 +538,20 @@ import kotlin.jvm.java
             buffer.delete(0, endParams + 1) // +1 to remove the split character
         }
     }
+
     override fun onCleared() {
         super.onCleared()
         ttsManager.shutdown()
     }
+
+    fun setImageBytes(bytes: ByteArray?) {
+        _state.update { it.copy(capturedImageBytes = bytes) }
     }
+
+    fun clearImage() {
+        _state.update { it.copy(capturedImageBytes = null) }
+    }
+}
 
 
 data class UsageStats(

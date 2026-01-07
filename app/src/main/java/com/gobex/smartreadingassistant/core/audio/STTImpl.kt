@@ -27,7 +27,7 @@ class AndroidSpeechToTextManager @Inject constructor(
 
     private val _state = MutableStateFlow<SttState>(SttState.Idle)
     override val state: StateFlow<SttState> = _state.asStateFlow()
-
+    private var lastResult: String? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private val mainScope = CoroutineScope(Dispatchers.Main)
 
@@ -42,13 +42,27 @@ class AndroidSpeechToTextManager @Inject constructor(
             }
         }
     }
-
+    override fun resetState() {
+        lastResult = null  // Clear the cache
+        _state.update { SttState.Idle }
+    }
     override fun startListening() {
         mainScope.launch {
             ensureRecognizer()
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+
+                // Set the primary language (e.g., English)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+
+                // Allow the recognizer to also consider Turkish
+                // Note: Support for multiple simultaneous languages varies by Android version/Google App version
+                val preferredLanguages = arrayListOf("en-US", "tr-TR")
+                putExtra(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES, preferredLanguages)
+
+                // Hint for the recognizer to expect these languages
+                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, "en-US")
+
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             }
             speechRecognizer?.startListening(intent)
@@ -86,11 +100,17 @@ class AndroidSpeechToTextManager @Inject constructor(
         override fun onResults(results: Bundle?) {
             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             if (!matches.isNullOrEmpty()) {
-                _state.update { SttState.Result(matches[0]) }
+                val result = matches[0]
+                // Only emit if it's a new result
+                if (result != lastResult) {
+                    lastResult = result
+                    _state.update { SttState.Result(result) }
+                }
             } else {
                 _state.update { SttState.Idle }
             }
         }
+
 
         override fun onPartialResults(partialResults: Bundle?) {
             // Optional: Update UI with partial text here if desired

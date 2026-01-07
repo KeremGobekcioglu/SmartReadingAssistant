@@ -1,5 +1,6 @@
 package com.gobex.smartreadingassistant.feature.device.data.repository
 
+import android.util.Log
 import com.gobex.smartreadingassistant.feature.device.data.Esp32ApiService
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
@@ -70,6 +71,7 @@ class DeviceRepository @Inject constructor() {
             if (response.isSuccessful && response.body() != null) {
                 Result.success(response.body()!!.bytes())
             } else {
+                Log.d("DEVICE REPOSITORY","Capture failed : ${response.body()}")
                 Result.failure(Exception("Capture failed : ${response.code()}"))
             }
         } catch (e: Exception) {
