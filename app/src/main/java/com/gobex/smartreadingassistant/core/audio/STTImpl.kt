@@ -87,13 +87,26 @@ class AndroidSpeechToTextManager @Inject constructor(
             val message = when(error) {
                 SpeechRecognizer.ERROR_NO_MATCH -> "No match"
                 SpeechRecognizer.ERROR_NETWORK -> "Network error"
+                5 -> "Client Error" // Error 5
                 else -> "Error: $error"
             }
             // Ignore trivial errors
-            if(error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                _state.update { SttState.Idle }
-            } else {
-                _state.update { SttState.Error(message) }
+            when (error) {
+                // 1. Handle Error 5: Update state but tell UI to be silent
+                5 -> {
+                    _state.update { SttState.Error(message, shouldSpeak = false) }
+                }
+
+                // 2. Handle Trivial Errors: Just go back to Idle
+                SpeechRecognizer.ERROR_NO_MATCH,
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                    _state.update { SttState.Idle }
+                }
+
+                // 3. Handle All Other Errors: Update state and allow speaking
+                else -> {
+                    _state.update { SttState.Error(message, shouldSpeak = true) }
+                }
             }
         }
 

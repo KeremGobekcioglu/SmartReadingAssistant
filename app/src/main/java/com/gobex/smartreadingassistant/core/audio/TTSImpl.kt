@@ -22,18 +22,25 @@ class AndroidTextToSpeechManager @Inject constructor(
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale("tr", "TR"))
+            val localeTR = Locale("tr", "TR")
+            val result = tts?.setLanguage(localeTR)
+
+            // 1. Determine the language first
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e("TTS", "Turkish not supported, falling back to US")
+                tts?.language = Locale.US
+            }
+
+            // 2. Mark as ready BEFORE speaking the queue
+            isInitialized = true
+
+            // 3. Now speak whatever was waiting
             synchronized(pendingSpeech) {
                 pendingSpeech.forEach { speak(it) }
                 pendingSpeech.clear()
             }
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                // Fallback to English if Turkish isn't found, or log the error
-                tts?.language = Locale.US
-                isInitialized = true
-            } else {
-                isInitialized = true
-            }
+        } else {
+            Log.e("TTS", "Initialization failed with status: $status")
         }
     }
 
@@ -53,6 +60,7 @@ class AndroidTextToSpeechManager @Inject constructor(
             }
         }
     }
+
 
     override fun stop() {
         tts?.stop()

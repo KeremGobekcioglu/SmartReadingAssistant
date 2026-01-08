@@ -2,6 +2,7 @@ package com.gobex.smartreadingassistant.core.connectivity
 
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import com.gobex.smartreadingassistant.feature.device.data.local.DeviceConnectionDao
 import com.gobex.smartreadingassistant.feature.device.data.local.DeviceConnectionEntity
 import com.gobex.smartreadingassistant.feature.device.data.repository.DeviceRepository
@@ -40,14 +41,18 @@ class DeviceConnectionManager @Inject constructor(
     // Observe active connection from database
     val activeConnection: Flow<DeviceConnectionEntity?> =
         connectionDao.getActiveConnectionFlow()
-    private val bluetoothAdapter: android.bluetooth.BluetoothAdapter? by lazy {
-        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
-        manager.adapter
+    private val bluetoothManager by lazy {
+        context.getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
     }
 
+    private val bluetoothAdapter: android.bluetooth.BluetoothAdapter?
+        get() = bluetoothManager.adapter
+
+    // 1. Initialize with current hardware state
     private val _isBluetoothEnabled = MutableStateFlow(bluetoothAdapter?.isEnabled == true)
     val isBluetoothEnabled = _isBluetoothEnabled.asStateFlow()
 
+    // 2. Define the Receiver
     private val bluetoothReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED) {
@@ -55,46 +60,55 @@ class DeviceConnectionManager @Inject constructor(
                     android.bluetooth.BluetoothAdapter.EXTRA_STATE,
                     android.bluetooth.BluetoothAdapter.ERROR
                 )
-                _isBluetoothEnabled.value = (state == android.bluetooth.BluetoothAdapter.STATE_ON)
+                val isEnabled = (state == android.bluetooth.BluetoothAdapter.STATE_ON)
+
+                // Only update if value actually changed
+                if (_isBluetoothEnabled.value != isEnabled) {
+                    Log.d("CONN_MGR", "Bluetooth State Changed: $isEnabled")
+                    _isBluetoothEnabled.value = isEnabled
+                }
             }
         }
     }
     init {
         val filter = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
         context.registerReceiver(bluetoothReceiver, filter)
+        refreshBluetoothState()
         // Try to reconnect to last active connection on app start
         CoroutineScope(Dispatchers.IO).launch {
             attemptReconnectToSavedConnection()
         }
     }
-
+    fun refreshBluetoothState() {
+        val current = bluetoothAdapter?.isEnabled == true
+        if (_isBluetoothEnabled.value != current) {
+            _isBluetoothEnabled.value = current
+            Log.d("CONN_MGR", "Bluetooth State Refreshed: $current")
+        }
+    }
     private suspend fun attemptReconnectToSavedConnection() {
         val lastConnection = connectionDao.getActiveConnection()
 
         if (lastConnection != null) {
-            _state.value = ConnectionState.Connecting("Reconnecting to ${lastConnection.deviceIp}...")
-
-            // Try HTTP ping first
+            _state.value = ConnectionState.Connecting("Reconnecting to glasses...")
             val isAlive = deviceRepository.pingDevice(lastConnection.deviceIp)
 
             if (isAlive) {
-                // Success! Reconnect instantly
                 deviceRepository.connectToDeviceServer(lastConnection.deviceIp)
                 connectionDao.updateHealthCheck(lastConnection.id)
-
-                _state.value = ConnectionState.Connected(
-                    lastConnection.deviceIp,
-                    lastConnection.id
-                )
+                _state.value = ConnectionState.Connected(lastConnection.deviceIp, lastConnection.id)
             } else {
-                // Mark as disconnected and fall back to manual connect
+                // IF THE PING FAILS ON STARTUP:
+                // Don't just give up; the device is likely waiting for BLE!
+                Log.d("DEVICE", "Saved device not on WiFi. Starting BLE flow.")
                 connectionDao.deactivateAll()
-                _state.value = ConnectionState.Disconnected
+                connect() // Trigger the automated BLE handshake
             }
         }
     }
 
     suspend fun connect() {
+        if (_state.value is ConnectionState.Connecting) return
         if (!_isBluetoothEnabled.value) {
             _state.value = ConnectionState.Error("Bluetooth is disabled. Please enable it to connect.")
             return
@@ -179,13 +193,29 @@ class DeviceConnectionManager @Inject constructor(
     suspend fun performHealthCheck() {
         val connection = connectionDao.getActiveConnection() ?: return
 
-        val isAlive = deviceRepository.pingDevice(connection.deviceIp)
+        // Try to ping 3 times with a delay before giving up
+        var isAlive = false
+        repeat(3) { attempt ->
+            isAlive = deviceRepository.pingDevice(connection.deviceIp)
+            if (isAlive) return@repeat // Found it!
+
+            Log.d("DEVICE", "Ping attempt ${attempt + 1} failed. Waiting...")
+            delay(2000) // Wait 2 seconds between pings
+        }
 
         if (isAlive) {
             connectionDao.updateHealthCheck(connection.id)
         } else {
+            Log.d("DEVICE CONNECTION MANAGER", "Ping failed after retries. Starting BLE recovery.")
+
+            // 1. Move to connecting state
+            _state.value = ConnectionState.Connecting("Connection lost. Reconnecting...")
+
+            // 2. Clean up old session
             connectionDao.deactivateAll()
-            _state.value = ConnectionState.Disconnected
+
+            // 3. Trigger BLE handshake
+            connect()
         }
     }
     // Call this if the app is shutting down or if this wasn't a Singleton

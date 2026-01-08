@@ -2,6 +2,7 @@ package com.gobex.smartreadingassistant.feature.conversation.presentation
 
 import android.Manifest
 import android.os.Build
+import android.util.Log
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BluetoothDisabled
@@ -45,12 +46,42 @@ fun ConnectScreen(
             permissionsState.launchMultiplePermissionRequest()
         }
     }
-    if (permissionsState.allPermissionsGranted) {
-        val isBluetoothEnabled by viewModel.isBluetoothEnabled.collectAsStateWithLifecycle()
-        val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
-        val isConnected by viewModel.isDeviceConnected.collectAsStateWithLifecycle()
-        val assignedIp by viewModel.assignedIp.collectAsStateWithLifecycle()
 
+    if (permissionsState.allPermissionsGranted) {
+
+        val isBluetoothEnabled by viewModel.isBluetoothEnabled.collectAsState()
+        val isConnected by viewModel.isDeviceConnected.collectAsState()
+        val connectionStatus by viewModel.connectionStatus.collectAsState()
+        val assignedIp by viewModel.assignedIp.collectAsStateWithLifecycle()
+        // 1. LIFECYCLE OBSERVER: Force refresh when user comes back from settings/shade
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    Log.d("UI", "App Resumed - Refreshing Bluetooth State")
+                    // You'll need to expose this in ViewModel, or just rely on the flow
+                    // Ideally, add refreshBluetoothState() to your ViewModel and call it here:
+                    viewModel.refreshBluetoothState()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+
+        // 2. AUTO-CONNECT TRIGGER
+        LaunchedEffect(isBluetoothEnabled, isConnected) {
+            // Log to confirm the UI sees the change
+            Log.d("AUTO_CONNECT", "State Check -> BT: $isBluetoothEnabled, Connected: $isConnected")
+
+            if (isBluetoothEnabled && !isConnected) {
+                if (connectionStatus == "Ready to Connect" || connectionStatus.contains("Error")) {
+                    // Small delay to let Bluetooth hardware stabilize
+                    kotlinx.coroutines.delay(500)
+                    Log.d("AUTO_CONNECT", "Triggering Connection...")
+                    viewModel.connectToSmartGlasses()
+                }
+            }
+        }
         // REMOVED: The LaunchedEffects that auto-navigate
 
         Surface(

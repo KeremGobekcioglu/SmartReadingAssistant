@@ -8,7 +8,7 @@ sealed class SttState {
     data object Idle : SttState()
     data object Listening : SttState()
     data class Result(val text: String) : SttState()
-    data class Error(val error: String) : SttState()
+    data class Error(val error: String, val shouldSpeak: Boolean? = true) : SttState()
 }
 
 interface SpeechToTextManager {

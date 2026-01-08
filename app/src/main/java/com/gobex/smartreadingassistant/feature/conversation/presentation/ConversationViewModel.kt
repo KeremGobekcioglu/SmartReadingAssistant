@@ -78,7 +78,7 @@ class ConversationViewModel @Inject constructor(
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
-            initialValue = true // Assume true until the first check
+            initialValue = connectionManager.isBluetoothEnabled.value // Assume true until the first check
         )
     val isDeviceConnected: StateFlow<Boolean> = connectionManager.state.map { state ->
         state is DeviceConnectionManager.ConnectionState.Connected
@@ -99,8 +99,11 @@ class ConversationViewModel @Inject constructor(
     init {
         loadHistory()
         observeSttWithCommands()
+        startHeartbeat()
     }
-
+    fun refreshBluetoothState() {
+        connectionManager.refreshBluetoothState()
+    }
     // ====================================================================================
     //                                  IOT CONNECTION LOGIC
     // ====================================================================================
@@ -129,7 +132,13 @@ class ConversationViewModel @Inject constructor(
                 }
 
                 is SttState.Error -> {
-                    announceState(AppState.Error(sttState.error))
+                    // 1. Only speak (announce) if shouldSpeak is true
+                    if (sttState.shouldSpeak == true) {
+                        announceState(AppState.Error(sttState.error))
+                    }
+
+                    // 2. Always show the visual error on screen (UI Effect)
+                    // so the user knows why it stopped, even if it's silent.
                     _uiEffect.send(ConversationEffect.ShowError(sttState.error))
                 }
 
@@ -140,8 +149,18 @@ class ConversationViewModel @Inject constructor(
     // Add a function to just hide the dialog
     // 2. Audio Control Methods
     fun startListening() {
-        ttsManager.stop() // Stop TTS if user wants to speak
-        sttManager.startListening()
+        // 1. Stop TTS immediately (Non-suspending call)
+        ttsManager.stop()
+
+        // 2. Launch a coroutine to handle the "wait then listen" logic
+        viewModelScope.launch {
+            // Give the Android audio hardware ~300ms to stop the physical speaker
+            // and prevent the mic from "hearing" the tail end of the AI
+            delay(300)
+
+            // 3. Now start the microphone
+            sttManager.startListening()
+        }
     }
 
     fun stopListening() {
@@ -447,7 +466,16 @@ class ConversationViewModel @Inject constructor(
         }
     }
 
-
+    private fun startHeartbeat() = viewModelScope.launch {
+        while (true) {
+            val currentState = connectionManager.state.value
+            if (currentState is DeviceConnectionManager.ConnectionState.Connected) {
+                // Use the performHealthCheck we discussed earlier
+                connectionManager.performHealthCheck()
+            }
+            delay(10000) // Check every 10 seconds
+        }
+    }
     /**
      * Handles voice commands or sends to AI
      */
@@ -460,6 +488,21 @@ class ConversationViewModel @Inject constructor(
                 announceAction("Capturing photo")
 //                captureAndAnalyze()
                 captureImageOnly()
+            }
+
+            is VoiceCommand.Instructions ->
+            {
+//                announceAction(
+//                    "Push to talk mode active. " +
+//                            "Hold volume up button to speak, release to send. " +
+//                            "Hold volume down button to take a picture. " +
+//                            "You can say commands like: take a picture, flash on, or ask me anything."
+//                )
+                announceAction(
+                    "Screen button mode active. " +
+                            "Bottom Left: hold to speak. " +
+                            "Bottom Right: tap to take picture."
+                )
             }
 
             is VoiceCommand.ToggleFlash -> {

@@ -1,5 +1,6 @@
 package com.gobex.smartreadingassistant.feature.conversation.presentation
 
+import android.speech.tts.Voice
 import com.gobex.smartreadingassistant.feature.conversation.domain.Message
 
 // ==================== ENHANCED STATE ====================
@@ -112,6 +113,8 @@ enum class SoundType {
 sealed class VoiceCommand {
     object CapturePhoto : VoiceCommand()
     object ToggleFlash : VoiceCommand()
+
+    object Instructions: VoiceCommand()
     data class SetFlash(val on: Boolean) : VoiceCommand()
     object StopSpeaking : VoiceCommand()
     object RepeatLast : VoiceCommand()
@@ -144,6 +147,8 @@ object VoiceCommandParser {
         // Conversation control
         listOf("clear chat", "clear conversation", "start over", "new conversation")
                 to VoiceCommand.ClearConversation,
+
+        listOf("how to use this app" , "instructions" , "commands") to VoiceCommand.Instructions
     )
 
     /**
