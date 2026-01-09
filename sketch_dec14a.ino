@@ -450,6 +450,8 @@ void loop() {
         }
       } else {
         Serial.println("WiFi Failed! Wrong Password?");
+        delay(1000); // Give user time to see the serial message
+        ESP.restart(); // This reboots the chip and brings BLE back up
       }
     }
   }
