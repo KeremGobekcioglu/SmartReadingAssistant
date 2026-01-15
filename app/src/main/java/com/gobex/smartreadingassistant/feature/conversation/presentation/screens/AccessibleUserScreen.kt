@@ -46,12 +46,17 @@ fun AccessibleUserScreen(
     val connectionState by viewModel.isDeviceConnected.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? ComponentActivity
+    val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
     // Keep screen on
     DisposableEffect(Unit) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+    }
+    LaunchedEffect(connectionStatus) {
+        Log.d("ACCESSIBLE_SCREEN", "Connection status: $connectionStatus")
+        // The ViewModel's observeConnectionStateChanges() will handle TTS announcements
     }
     // ===== PUSH-TO-TALK: HARDWARE BUTTONS =====
     HardwareKeyHandler(
@@ -286,13 +291,6 @@ private fun StatusAndTranscriptionArea(
         verticalArrangement = Arrangement.Center
     ) {
         // HUGE STATUS TEXT
-        val statusText = when {
-            sttState is SttState.Listening -> "LISTENING..."
-            isStreaming -> "PROCESSING..."
-            appState is AppState.Capturing -> "CAPTURING PHOTO..."
-            else -> "READY"
-        }
-
         val statusColor = when {
             sttState is SttState.Listening -> Color(0xFFFF5252) // Red
             isStreaming -> Color(0xFF2196F3) // Blue
@@ -300,14 +298,43 @@ private fun StatusAndTranscriptionArea(
             else -> Color.White
         }
 
-        Text(
-            text = statusText,
-            fontSize = 48.sp,
-            fontWeight = FontWeight.Black,
-            color = statusColor,
-            textAlign = TextAlign.Center,
-            letterSpacing = 2.sp
-        )
+        if (appState is AppState.Capturing) {
+            // Two separate Text components for "CAPTURING PHOTO..."
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "CAPTURING",
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Black,
+                    color = statusColor,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "PHOTO...",
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Black,
+                    color = statusColor,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        } else {
+            val statusText = when {
+                sttState is SttState.Listening -> "LISTENING..."
+                isStreaming -> "PROCESSING..."
+                else -> "READY"
+            }
+            Text(
+                text = statusText,
+                fontSize = 36.sp,
+                fontWeight = FontWeight.Black,
+                color = statusColor,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
 
         Spacer(modifier = Modifier.height(24.dp))
 
