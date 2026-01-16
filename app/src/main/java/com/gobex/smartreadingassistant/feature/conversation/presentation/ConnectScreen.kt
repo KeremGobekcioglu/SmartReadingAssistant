@@ -5,20 +5,35 @@ import android.os.Build
 import android.util.Log
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.SettingsBluetooth
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview.HighContrastBlack
+import com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview.HighContrastGreen
+import com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview.HighContrastRed
+import com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview.HighContrastWhite
+import com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview.HighContrastYellow
+import com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview.LargeAccessibilityButton
+import com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview.StatusIndicator
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
-
+import androidx.compose.ui.platform.LocalHapticFeedback
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun ConnectScreen(
@@ -26,6 +41,8 @@ fun ConnectScreen(
     onNavigateToChat: () -> Unit,
     onNavigateToAccessibleChat: () -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
+    viewModel.isConnectScreen()
     val permissionsState = rememberMultiplePermissionsState(
         permissions = buildList {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -48,26 +65,12 @@ fun ConnectScreen(
     }
 
     if (permissionsState.allPermissionsGranted) {
-
+// 1. LIFECYCLE: Start monitoring and STOP when leaving
         val isBluetoothEnabled by viewModel.isBluetoothEnabled.collectAsState()
         val isConnected by viewModel.isDeviceConnected.collectAsState()
         val connectionStatus by viewModel.connectionStatus.collectAsState()
         val assignedIp by viewModel.assignedIp.collectAsStateWithLifecycle()
-        // 1. LIFECYCLE OBSERVER: Force refresh when user comes back from settings/shade
-        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-        DisposableEffect(lifecycleOwner) {
-            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                    Log.d("UI", "App Resumed - Refreshing Bluetooth State")
-                    // You'll need to expose this in ViewModel, or just rely on the flow
-                    // Ideally, add refreshBluetoothState() to your ViewModel and call it here:
-                    viewModel.refreshBluetoothState()
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
-
+        val uiState by viewModel.state.collectAsStateWithLifecycle()
         // 2. AUTO-CONNECT TRIGGER
         LaunchedEffect(isBluetoothEnabled, isConnected) {
             // Log to confirm the UI sees the change
@@ -82,83 +85,142 @@ fun ConnectScreen(
                 }
             }
         }
-        // REMOVED: The LaunchedEffects that auto-navigate
 
-        Surface(
+        DisposableEffect(Unit) {
+            val announcementJob = viewModel.startConnectionAnnouncements()
+
+            // Check BT status immediately on entry
+            viewModel.checkAndAnnounceBluetoothStatus()
+
+            onDispose {
+                announcementJob.cancel() // Kill the observer loop
+                viewModel.stopSpeaking() // Silence TTS immediately
+            }
+        }
+        Scaffold(
             modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.background
-        ) {
+            containerColor = HighContrastBlack // Dark mode default is better for many VI users (reduces glare)
+        ) { padding->
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                    .padding(padding)
+                    .paddingFromBaseline(top = 12.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(
-                    text = "Smart Reader",
-                    style = MaterialTheme.typography.headlineLarge,
-                    color = MaterialTheme.colorScheme.primary
-                )
 
-                Spacer(modifier = Modifier.height(48.dp))
-                if (!isBluetoothEnabled) {
-                    BluetoothDisabledWarning()
-                }
-                // 1. Success State: Show IP and Navigation Button
-                if (isConnected && assignedIp != null) {
-                    Icon(
-                        imageVector = Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = Color(0xFF4CAF50),
-                        modifier = Modifier.size(80.dp)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Glasses Found!", fontWeight = FontWeight.Bold)
-                    Text("IP Address: $assignedIp", style = MaterialTheme.typography.bodySmall)
-
-                    Spacer(modifier = Modifier.height(32.dp))
-
-                    Button(
-                        onClick = onNavigateToChat,
-                        modifier = Modifier.fillMaxWidth().height(56.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
-                    ) {
-                        Text("Start Chatting", fontSize = 18.sp)
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    Button(
-                        onClick = onNavigateToAccessibleChat,
-                        modifier = Modifier.fillMaxWidth().height(56.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6200EE))
-                    ) {
-                        Text("Start Accessible Chatting.", fontSize = 18.sp)
+                // --- HEADER SECTION ---
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Semantics: Merge these so TalkBack reads "Smart Reader, AI Assistant" in one go
+                    Column(modifier = Modifier.semantics(mergeDescendants = true) {}) {
+                        Text(
+                            text = "Smart Reader",
+                            style = MaterialTheme.typography.displaySmall, // Larger
+                            fontWeight = FontWeight.ExtraBold,
+                            color = HighContrastWhite,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            text = "AI Assistant",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = HighContrastYellow,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
-                // 2. Loading State
-                else if (connectionStatus.contains("Scanning") || connectionStatus.contains("Starting") || connectionStatus.contains("Sending")) {
-                    CircularProgressIndicator(modifier = Modifier.size(64.dp))
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(text = connectionStatus)
-                }
-                // 3. Initial / Error State
-                else {
-                    Button(
-                        onClick = { viewModel.connectToSmartGlasses() },
-                        modifier = Modifier.fillMaxWidth().height(56.dp),
-                        isBluetoothEnabled
-                    ) {
-                        Text("Connect Glasses", fontSize = 18.sp)
+
+                // --- STATUS SECTION (CENTER) ---
+                // This acts as the visual anchor.
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!isBluetoothEnabled) {
+                        StatusIndicator(
+                            icon = Icons.Default.BluetoothDisabled,
+                            color = HighContrastRed,
+                            mainText = "Bluetooth Off",
+                            subText = "Enable in settings",
+                            isError = true
+                        )
+                    } else if (isConnected && assignedIp != null) {
+                        StatusIndicator(
+                            icon = Icons.Default.CheckCircle,
+                            color = HighContrastGreen,
+                            mainText = "Connected",
+                            subText = "Ready to read"
+                        )
+                    } else if (uiState.currentAppState is AppState.Connecting ||
+                        connectionStatus.contains("Connecting") ||
+                        connectionStatus.contains("Sending") ||
+                        connectionStatus.contains("restarting")) {
+                        StatusIndicator(
+                            icon = Icons.Default.Radar, // Radar implies scanning better than circle
+                            color = HighContrastYellow,
+                            mainText = if(connectionStatus.contains("restarting")) "Syncing..." else "Scanning...",
+                            subText = "Looking for glasses",
+                            isLoading = true
+                        )
+                    } else {
+                        StatusIndicator(
+                            icon = Icons.Default.BluetoothSearching,
+                            color = HighContrastWhite,
+                            mainText = "Disconnected",
+                            subText = "Ready to pair"
+                        )
                     }
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(text = connectionStatus)
                 }
 
-                Spacer(modifier = Modifier.height(48.dp))
+                // --- CONTROLS SECTION (BOTTOM) ---
+                // Big buttons, easy to hit.
+                Column(
+                    verticalArrangement = Arrangement.Bottom
+                ) {
+                    if (isConnected && assignedIp != null) {
+                        // Primary Task: Accessible Chat
+                        // We prioritize the Accessible Chat for this specific user group
+                        LargeAccessibilityButton(
+                            text = "Start Reading Mode",
+                            icon = Icons.Default.Visibility,
+                            backgroundColor = HighContrastYellow,
+                            textColor = Color.Black,
+                            onClick = {
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                onNavigateToAccessibleChat()
+                            }
+                        )
 
-                if (!isConnected) {
-                    TextButton(onClick = onNavigateToChat) {
-                        Text("Skip (Test Mode)")
+                        // Secondary Task
+//                    LargeAccessibilityButton(
+//                        text = "Standard Chat",
+//                        icon = Icons.Default.Chat,
+//                        backgroundColor = Color.DarkGray,
+//                        textColor = Color.White,
+//                        onClick = {
+//                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+//                            onNavigateToChat()
+//                        }
+//                    )
+                    } else {
+                        // Connect Button
+                        LargeAccessibilityButton(
+                            text = if (isBluetoothEnabled) "Connect to Glasses" else "Enable Bluetooth From Settings",
+                            icon = if (isBluetoothEnabled) Icons.Default.Bluetooth else Icons.Default.SettingsBluetooth,
+                            backgroundColor = if (isBluetoothEnabled) HighContrastWhite else HighContrastRed,
+                            textColor = Color.Black,
+                            onClick = {
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                viewModel.connectToSmartGlasses()
+                            },
+                            isBluetoothEnabled
+                        )
                     }
                 }
             }

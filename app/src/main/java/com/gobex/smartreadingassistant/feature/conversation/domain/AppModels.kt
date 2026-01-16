@@ -8,7 +8,11 @@ data class Message(
     val timestamp: Long = System.currentTimeMillis(),
     val totalTokenCount: Int? = null
 )
-
+enum class ResponseMode {
+    BRIEF,      // 1 sentence max
+    NORMAL,     // 2-3 sentences
+    DETAILED    // Full descriptions
+}
 enum class MessageRole {
     USER, ASSISTANT
 }

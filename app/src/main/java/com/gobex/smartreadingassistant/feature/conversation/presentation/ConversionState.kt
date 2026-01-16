@@ -16,33 +16,11 @@ data class ConversionState(
     val isAccessibilityMode: Boolean = false,
     val isVoiceAnnouncementsEnabled: Boolean = false,
     val currentAppState: AppState = AppState.Idle,
-    val lastAnnouncedState: AppState? = null
+    val lastAnnouncedState: AppState? = null,
+    val isConnectScreen: Boolean = true,
 ) {
     // ByteArray equality override if needed
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
 
-        other as ConversionState
-
-        if (messages != other.messages) return false
-        if (isStreaming != other.isStreaming) return false
-        if (currentText != other.currentText) return false
-        if (isLoadingHistory != other.isLoadingHistory) return false
-        if (capturedImageBytes != null) {
-            if (other.capturedImageBytes == null) return false
-            if (!capturedImageBytes.contentEquals(other.capturedImageBytes)) return false
-        } else if (other.capturedImageBytes != null) return false
-        if (currentImageUri != other.currentImageUri) return false  // ✅ ADD THIS!
-        if (isImageDialogVisible != other.isImageDialogVisible) return false
-        if (isFlashOn != other.isFlashOn) return false
-        if (isAccessibilityMode != other.isAccessibilityMode) return false
-        if (isVoiceAnnouncementsEnabled != other.isVoiceAnnouncementsEnabled) return false
-        if (currentAppState != other.currentAppState) return false
-        if (lastAnnouncedState != other.lastAnnouncedState) return false
-
-        return true
-    }
 
     override fun hashCode(): Int {
         var result = messages.hashCode()
@@ -58,6 +36,29 @@ data class ConversionState(
         result = 31 * result + currentAppState.hashCode()
         result = 31 * result + (lastAnnouncedState?.hashCode() ?: 0)
         return result
+    }
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as ConversionState
+
+        if (isStreaming != other.isStreaming) return false
+        if (isLoadingHistory != other.isLoadingHistory) return false
+        if (isImageDialogVisible != other.isImageDialogVisible) return false
+        if (isFlashOn != other.isFlashOn) return false
+        if (isAccessibilityMode != other.isAccessibilityMode) return false
+        if (isVoiceAnnouncementsEnabled != other.isVoiceAnnouncementsEnabled) return false
+        if (isConnectScreen != other.isConnectScreen) return false
+        if (messages != other.messages) return false
+        if (currentText != other.currentText) return false
+        if (!capturedImageBytes.contentEquals(other.capturedImageBytes)) return false
+        if (currentImageUri != other.currentImageUri) return false
+        if (currentAppState != other.currentAppState) return false
+        if (lastAnnouncedState != other.lastAnnouncedState) return false
+
+        return true
     }
 }
 
@@ -80,9 +81,9 @@ sealed class AppState {
         is Processing -> "Processing your question"
         is Speaking -> "" // Don't announce, already speaking
         is Capturing -> step
-        is Connected -> "Connected to glasses at IP $ip"
-        is Connecting -> "Connecting to glasses"
-        is Disconnected -> "Disconnected"
+        is Connected -> "Success. Your glasses are connected and ready to use."
+        is Connecting -> "Connecting to glasses. Please wait."
+        is Disconnected -> "Glasses disconnected. Please ensure they are turned on."
         is Error -> "Error: $message"
     }
 
@@ -119,6 +120,8 @@ sealed class VoiceCommand {
     object StopSpeaking : VoiceCommand()
     object RepeatLast : VoiceCommand()
     object ClearConversation : VoiceCommand()
+    object ReadAll : VoiceCommand()
+    object Stop : VoiceCommand()
     data class SendToAI(val text: String) : VoiceCommand() // Not a command, send to Gemini
 }
 
@@ -147,6 +150,10 @@ object VoiceCommandParser {
         // Conversation control
         listOf("clear chat", "clear conversation", "start over", "new conversation")
                 to VoiceCommand.ClearConversation,
+        listOf("read all", "read everything", "read the whole thing", "read text")
+                to VoiceCommand.ReadAll,
+
+        listOf("stop reading", "stop" , "end conversation") to VoiceCommand.Stop,
 
         listOf("how to use this app" , "instructions" , "commands") to VoiceCommand.Instructions
     )

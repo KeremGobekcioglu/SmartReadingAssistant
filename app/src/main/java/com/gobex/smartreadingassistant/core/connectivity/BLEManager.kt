@@ -28,40 +28,47 @@ class BleConnectionManager @Inject constructor(
 
     private val _deviceIpFlow = MutableSharedFlow<String>(replay = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val deviceIpFlow = _deviceIpFlow.asSharedFlow()
-
+    private var handshakeJob: Job? = null // To track the connection process
+    private var currentScanCallback: ScanCallback? = null // To track the active scan
     @SuppressLint("MissingPermission")
     fun startConnectionSequence(ssid: String, pass: String) {
-        val scanner = adapter?.bluetoothLeScanner
-        if (scanner == null) return
+        val scanner = adapter?.bluetoothLeScanner ?: return
 
-        // 1. Create a Filter for your specific Service UUID
+        // --- NEW: THE CLEANUP (This prevents the "stacking" problem) ---
+        // If a scan is already running, stop it first
+        currentScanCallback?.let { scanner.stopScan(it) }
+        // If we are mid-handshake, cancel it
+        handshakeJob?.cancel()
+        // ---------------------------------------------------------------
+
         val serviceUuid = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(serviceUuid))
-            .build()
+        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(serviceUuid)).build()
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
 
-        // 2. Configure Settings for Low Latency (Fast discovery)
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-
-        scanner.startScan(listOf(filter), settings, object : ScanCallback() {
+        // Save this callback to our variable so we can stop it later
+        val scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 val device = result?.device ?: return
-
-                // No need to check name anymore, the filter guarantees it's your ESP32
                 Log.d("BLE", "ESP32 Found: ${device.address}")
+
                 scanner.stopScan(this)
-                performHandshake(device, ssid, pass)
+                currentScanCallback = null // Clear it since it's stopped
+
+                // Start the handshake and save it to our job variable
+                handshakeJob = performHandshake(device, ssid, pass)
             }
 
             override fun onScanFailed(errorCode: Int) {
                 Log.e("BLE", "Scan failed: $errorCode")
+                currentScanCallback = null
             }
-        })
+        }
+
+        currentScanCallback = scanCallback // Store the current scan
+        scanner.startScan(listOf(filter), settings, scanCallback)
     }
-    private fun performHandshake(device: BluetoothDevice, ssid: String, pass: String) {
-        CoroutineScope(Dispatchers.IO).launch {
+    private fun performHandshake(device: BluetoothDevice, ssid: String, pass: String) : Job {
+        return CoroutineScope(Dispatchers.IO).launch {
             try {
                 Log.d("BLE", "Connecting...")
                 // 1. Connect using Nordic Library features

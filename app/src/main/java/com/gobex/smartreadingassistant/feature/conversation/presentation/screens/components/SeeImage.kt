@@ -1,6 +1,7 @@
 package com.gobex.smartreadingassistant.feature.conversation.presentation.screens.components
 
 import android.graphics.BitmapFactory
+import android.media.Image
 import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
@@ -21,7 +22,8 @@ import androidx.compose.ui.window.DialogProperties
 fun CapturedImageDialog(
     imageBytes: ByteArray?,
     onDismiss: () -> Unit,
-    showDialog: Boolean
+    showDialog: Boolean,
+    image: Image? = null
 ) {
     Log.d("DIALOG_COMPOSABLE", "showDialog=$showDialog, hasImage=${imageBytes != null}")
 

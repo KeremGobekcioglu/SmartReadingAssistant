@@ -9,11 +9,13 @@ import com.gobex.smartreadingassistant.feature.device.data.repository.DeviceRepo
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
@@ -34,7 +36,7 @@ class DeviceConnectionManager @Inject constructor(
         data class Connected(val ip: String, val connectionId: Long) : ConnectionState()
         data class Error(val message: String) : ConnectionState()
     }
-
+    private var connectionJob: Job? = null
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val state = _state.asStateFlow()
 
@@ -70,8 +72,10 @@ class DeviceConnectionManager @Inject constructor(
             }
         }
     }
+
     init {
-        val filter = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+        val filter =
+            android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
         context.registerReceiver(bluetoothReceiver, filter)
         refreshBluetoothState()
         // Try to reconnect to last active connection on app start
@@ -79,6 +83,7 @@ class DeviceConnectionManager @Inject constructor(
             attemptReconnectToSavedConnection()
         }
     }
+
     fun refreshBluetoothState() {
         val current = bluetoothAdapter?.isEnabled == true
         if (_isBluetoothEnabled.value != current) {
@@ -86,6 +91,7 @@ class DeviceConnectionManager @Inject constructor(
             Log.d("CONN_MGR", "Bluetooth State Refreshed: $current")
         }
     }
+
     private suspend fun attemptReconnectToSavedConnection() {
         val lastConnection = connectionDao.getActiveConnection()
 
@@ -101,6 +107,7 @@ class DeviceConnectionManager @Inject constructor(
                 // IF THE PING FAILS ON STARTUP:
                 // Don't just give up; the device is likely waiting for BLE!
                 Log.d("DEVICE", "Saved device not on WiFi. Starting BLE flow.")
+                _state.value = ConnectionState.Disconnected
                 connectionDao.deactivateAll()
                 connect() // Trigger the automated BLE handshake
             }
@@ -109,41 +116,49 @@ class DeviceConnectionManager @Inject constructor(
 
     suspend fun connect() {
         if (_state.value is ConnectionState.Connecting) return
-        if (!_isBluetoothEnabled.value) {
-            _state.value = ConnectionState.Error("Bluetooth is disabled. Please enable it to connect.")
-            return
-        }
+
+        // Reset/Cancel any previous attempt
+        connectionJob?.cancel()
+
         val serviceIntent = Intent(context, HotspotService::class.java)
         context.startService(serviceIntent)
 
-        _state.value = ConnectionState.Connecting("Starting Hotspot...")
+        // We use CoroutineScope(Dispatchers.IO).launch so we can use while(isActive)
+        connectionJob = CoroutineScope(Dispatchers.IO).launch {
+            try {
+                // Get credentials once
+                hotspotManager.startHotspot().collect { creds ->
 
-        try {
-            hotspotManager.startHotspot().collect { creds ->
-                _state.value = ConnectionState.Connecting("Sending Credentials via BLE...")
+                    // --- THE RECOVERY LOOP ---
+                    while (isActive) {
+                        _state.value = ConnectionState.Connecting("Searching for glasses...")
 
-                bleManager.startConnectionSequence(creds.ssid, creds.pass)
+                        // 1. Reset BLE hardware and start scan
+                        bleManager.startConnectionSequence(creds.ssid, creds.pass)
 
-                val ipViaBle = withTimeoutOrNull(15_000) {
-                    bleManager.deviceIpFlow.first { it.isNotEmpty() }
-                }
+                        // 2. Wait for IP with a timeout
+                        // (Slightly longer than 6s to catch the reboot)
+                        val ipViaBle = withTimeoutOrNull(10_000) {
+                            bleManager.deviceIpFlow.first { it.isNotEmpty() }
+                        }
 
-                if (ipViaBle != null) {
-                    finalizeConnection(ipViaBle, creds.ssid, "BLE", serviceIntent)
-                } else {
-                    _state.value = ConnectionState.Connecting("BLE Timeout. Scanning Network...")
+                        if (ipViaBle != null) {
+                            finalizeConnection(ipViaBle, creds.ssid, "BLE", serviceIntent)
+                            break // Success! Exit the loop
+                        } else {
+                            // 3. FAILURE CASE: Glasses probably restarted
+                            Log.d("CONN_MGR", "Timeout. Glasses likely rebooting. Retrying...")
+                            _state.value = ConnectionState.Connecting("Glasses restarting... please wait.")
 
-                    val scannedIp = scanForDeviceWithRetry(15_000)
-
-                    if (scannedIp != null) {
-                        finalizeConnection(scannedIp, creds.ssid, "NETWORK_SCAN", serviceIntent)
-                    } else {
-                        handleConnectionFailure(serviceIntent, "Could not find glasses")
+                            // Wait for the 6-second cycle to finish
+                            delay(6000)
+                            // Loop continues and tries bleManager.startConnectionSequence again
+                        }
                     }
                 }
+            } catch (e: Exception) {
+                handleConnectionFailure(serviceIntent, "Connection Error: ${e.message}")
             }
-        } catch (e: Exception) {
-            handleConnectionFailure(serviceIntent, "Connection Error: ${e.message}")
         }
     }
 
@@ -197,10 +212,15 @@ class DeviceConnectionManager @Inject constructor(
         var isAlive = false
         repeat(3) { attempt ->
             isAlive = deviceRepository.pingDevice(connection.deviceIp)
-            if (isAlive) return@repeat // Found it!
-
-            Log.d("DEVICE", "Ping attempt ${attempt + 1} failed. Waiting...")
-            delay(2000) // Wait 2 seconds between pings
+            if (isAlive) {
+                Log.d("HEALTH_CHECK", "✅ Ping successful on attempt ${attempt + 1}")
+                return@repeat // Found it!
+            }
+    
+            Log.d("HEALTH_CHECK", "❌ Ping attempt ${attempt + 1} failed. Waiting...")
+            if (attempt < 2) { // Don't delay after last attempt
+                delay(3000) // Wait 3 seconds between pings
+            }
         }
 
         if (isAlive) {
@@ -208,8 +228,8 @@ class DeviceConnectionManager @Inject constructor(
         } else {
             Log.d("DEVICE CONNECTION MANAGER", "Ping failed after retries. Starting BLE recovery.")
 
-            // 1. Move to connecting state
-            _state.value = ConnectionState.Connecting("Connection lost. Reconnecting...")
+            Log.d("CONNECTION MANAGER HEALTH CHECK" , "CONNECTION STATE IS UPDATED TO ${ConnectionState.Disconnected}")
+            _state.value = ConnectionState.Disconnected
 
             // 2. Clean up old session
             connectionDao.deactivateAll()

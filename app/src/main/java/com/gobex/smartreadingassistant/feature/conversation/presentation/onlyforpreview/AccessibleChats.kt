@@ -1,12 +1,5 @@
-package com.gobex.smartreadingassistant.feature.conversation.presentation.screens
+package com.gobex.smartreadingassistant.feature.conversation.presentation.onlyforpreview
 
-import android.content.Context
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.util.Log
-import android.view.WindowManager
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -20,149 +13,44 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.gobex.smartreadingassistant.core.audio.SttState
-import com.gobex.smartreadingassistant.feature.conversation.presentation.ConversationViewModel
-import com.gobex.smartreadingassistant.feature.conversation.presentation.ConversationEffect
 import com.gobex.smartreadingassistant.feature.conversation.presentation.AppState
 import com.gobex.smartreadingassistant.feature.conversation.presentation.screens.components.CapturedImageDialog
-import com.gobex.smartreadingassistant.feature.conversation.presentation.screens.components.HardwareKeyHandler
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
+import com.gobex.smartreadingassistant.ui.theme.Typography
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import java.io.ByteArrayOutputStream
 
-private const val CAPTURE_HOLD_DURATION = 500L // 500ms hold required for capture
+// ==================== STATELESS VERSION (Preview-friendly) ====================
 
 @Composable
-fun AccessibleUserScreen(
-    viewModel: ConversationViewModel = hiltViewModel(),
-    onNavigateBack: () -> Unit
+private fun AccessibleUserContent(
+    isConnected: Boolean,
+    isFlashOn: Boolean,
+    isListening: Boolean,
+    isProcessing: Boolean,
+    sttState: SttState,
+    appState: AppState,
+    isStreaming: Boolean,
+    imageBytes: ByteArray?,
+    onMicPress: () -> Unit,
+    onMicRelease: () -> Unit,
+    onCameraTap: () -> Unit
 ) {
-    val uiState by viewModel.state.collectAsState()
-    val sttState by viewModel.sttState.collectAsStateWithLifecycle(initialValue = SttState.Idle)
-    val connectionState by viewModel.isDeviceConnected.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    val activity = context as? ComponentActivity
-    val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
-
-    // Keep screen on
-    DisposableEffect(Unit) {
-        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
-    }
-
-    LaunchedEffect(connectionStatus) {
-        Log.d("ACCESSIBLE_SCREEN", "Connection status: $connectionStatus")
-    }
-
-    // ===== PUSH-TO-TALK: HARDWARE BUTTONS =====
-    var volumeUpPressTime by remember { mutableStateOf(0L) }
-    var volumeDownPressTime by remember { mutableStateOf(0L) }
-
-    HardwareKeyHandler(
-        onVolumeUp = { isPressed ->
-            if (isPressed) {
-                // Button pressed - start listening after brief hold
-                volumeUpPressTime = System.currentTimeMillis()
-                scope.launch {
-                    delay(200) // Small delay to confirm press
-                    if (volumeUpPressTime > 0 && sttState !is SttState.Listening) {
-                        vibrate(context, VibrationPattern.START_LISTENING)
-                        viewModel.startListening() // STT handles VAD automatically
-                        Log.d("PushToTalk", "Volume Up - Starting listening")
-                    }
-                }
-            } else {
-                // Button released - reset timer
-                volumeUpPressTime = 0
-                // STT class will handle automatic stop via VAD
-                Log.d("PushToTalk", "Volume Up - Released (VAD will auto-stop)")
-            }
-        },
-        onVolumeDown = { isPressed ->
-            if (isPressed) {
-                // Start counting hold time
-                volumeDownPressTime = System.currentTimeMillis()
-                scope.launch {
-                    delay(CAPTURE_HOLD_DURATION)
-                    // If still pressed after duration, capture
-                    if (volumeDownPressTime > 0) {
-                        vibrate(context, VibrationPattern.LONG_PRESS)
-                        viewModel.captureImageOnly()
-                        volumeDownPressTime = 0 // Reset so we don't capture again
-                        Log.d("PushToTalk", "Volume Down - Captured photo")
-                    }
-                }
-            } else {
-                // Released - cancel capture if not enough time passed
-                volumeDownPressTime = 0
-            }
-        }
-    )
-
-    // ===== HANDLE EFFECTS =====
-    LaunchedEffect(Unit) {
-        viewModel.uiEffect.collectLatest { effect ->
-            when (effect) {
-                is ConversationEffect.ShowError -> {
-                    // Errors announced via TTS
-                }
-                is ConversationEffect.AnnounceAction -> {
-                    if (effect.withHaptic) {
-                        vibrate(context, VibrationPattern.ACTION_CONFIRM)
-                    }
-                }
-                else -> {}
-            }
-        }
-    }
-
-    // ===== BACK BUTTON =====
-    BackHandler {
-        viewModel.announceAction("Exiting voice mode")
-        viewModel.stopListening()
-        viewModel.disableAccessibilityMode()
-        onNavigateBack()
-    }
-
-    // ===== WELCOME ANNOUNCEMENT =====
-    LaunchedEffect(Unit) {
-        delay(500)
-        viewModel.announceAction(
-            "Push to talk mode active. " +
-                    "Hold volume up button to speak. AI will listen until you stop talking. " +
-                    "Hold volume down button for half a second to take a picture."
-        )
-        delay(500)
-        viewModel.announceAction(
-            "Screen button mode active. " +
-                    "Bottom Left: hold to speak, AI listens until you finish. " +
-                    "Bottom Right: hold for half a second to take picture."
-        )
-    }
-
-    Log.d("ACCESSIBLE USER SCREEN", "DIALOG VISIBLE: ${uiState.isImageDialogVisible}")
-    Log.d("UI_RENDER", "Composing - isImageDialogVisible: ${uiState.isImageDialogVisible}")
+    val testImageBytes = remember { createTestImageBytes() }
 
     CapturedImageDialog(
-        imageBytes = uiState.capturedImageBytes,
-        showDialog = uiState.isImageDialogVisible,
-        onDismiss = {
-            Log.d("UI_RENDER", "onDismiss callback triggered")
-            viewModel.dismissImageDialog()
-        }
+        imageBytes = testImageBytes,
+        showDialog = true,
+        onDismiss = {}
     )
-
-    // ===== MAIN UI =====
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -170,18 +58,18 @@ fun AccessibleUserScreen(
     ) {
         // TOP BAR - Connection Status + Indicators
         TopStatusBar(
-            isConnected = connectionState,
-            isFlashOn = uiState.isFlashOn,
-            isListening = sttState is SttState.Listening,
-            isProcessing = uiState.isStreaming
+            isConnected = isConnected,
+            isFlashOn = isFlashOn,
+            isListening = isListening,
+            isProcessing = isProcessing
         )
 
         // MIDDLE - Big Status Text + Transcription
         StatusAndTranscriptionArea(
             sttState = sttState,
-            appState = uiState.currentAppState,
-            isStreaming = uiState.isStreaming,
-            imageBytes = uiState.capturedImageBytes
+            appState = appState,
+            isStreaming = isStreaming,
+            imageBytes = imageBytes
         )
 
         // BOTTOM HALF - Two Giant Buttons
@@ -192,15 +80,10 @@ fun AccessibleUserScreen(
         ) {
             // MIC BUTTON (Left side - 50%)
             MicButton(
-                isListening = sttState is SttState.Listening,
-                isProcessing = uiState.isStreaming,
-                onPress = {
-                    vibrate(context, VibrationPattern.START_LISTENING)
-                    viewModel.startListening()
-                },
-                onRelease = {
-                    // STT handles auto-stop via VAD, so onRelease does nothing
-                },
+                isListening = isListening,
+                isProcessing = isProcessing,
+                onPress = onMicPress,
+                onRelease = onMicRelease,
                 modifier = Modifier.weight(1f)
             )
 
@@ -208,11 +91,8 @@ fun AccessibleUserScreen(
 
             // CAMERA BUTTON (Right side - 50%)
             CameraButton(
-                isCapturing = uiState.currentAppState is AppState.Capturing,
-                onTap = {
-                    vibrate(context, VibrationPattern.LONG_PRESS)
-                    viewModel.captureImageOnly()
-                },
+                isCapturing = appState is AppState.Capturing,
+                onTap = onCameraTap,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -315,7 +195,10 @@ private fun StatusAndTranscriptionArea(
         }
 
         if (appState is AppState.Capturing) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // Two separate Text components for "CAPTURING PHOTO..."
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
                     text = "CAPTURING",
                     fontSize = 36.sp,
@@ -407,7 +290,7 @@ private fun MicButton(
     modifier: Modifier = Modifier
 ) {
     var isPressed by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
+
     val backgroundColor = when {
         isListening -> Color(0xFFFF5252) // Red when listening
         isProcessing -> Color(0xFF2196F3) // Blue when processing
@@ -423,20 +306,11 @@ private fun MicButton(
             .pointerInput(Unit) {
                 detectTapGestures(
                     onPress = {
-                        isPressed = true // This triggers the Dark Gray color immediately
-
-                        val activationJob = scope.launch {
-                            delay(400) // The "Hold" threshold
-                            onPress()  // Tell ViewModel to start listening
-                        }
-
-                        try {
-                            awaitRelease() // Suspend until finger is lifted
-                        } finally {
-                            // This block ALWAYS runs when finger is lifted
-                            isPressed = false
-                            activationJob.cancel() // Stop the timer!
-                        }
+                        isPressed = true
+                        onPress()
+                        tryAwaitRelease()
+                        isPressed = false
+                        onRelease()
                     }
                 )
             },
@@ -473,14 +347,7 @@ private fun CameraButton(
     onTap: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var isHolding by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    val backgroundColor = when {
-        isCapturing -> Color(0xFFFFEB3B) // Yellow when capturing
-        isHolding -> Color(0xFF424242) // Dark gray when holding
-        else -> Color(0xFF2A2A2A) // Default dark
-    }
+    val backgroundColor = if (isCapturing) Color(0xFFFFEB3B) else Color(0xFF2A2A2A)
 
     Box(
         modifier = modifier
@@ -489,20 +356,7 @@ private fun CameraButton(
             .background(backgroundColor)
             .pointerInput(Unit) {
                 detectTapGestures(
-                    onPress = {
-                        isHolding = true
-
-                        // Wait 500ms before capturing
-                        scope.launch {
-                            delay(CAPTURE_HOLD_DURATION)
-                            if (isHolding) {
-                                onTap()
-                            }
-                        }
-
-                        tryAwaitRelease()
-                        isHolding = false
-                    }
+                    onTap = { onTap() }
                 )
             },
         contentAlignment = Alignment.Center
@@ -519,50 +373,281 @@ private fun CameraButton(
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = when {
-                    isCapturing -> "CAPTURING..."
-                    isHolding -> "HOLD..."
-                    else -> "HOLD TO\nCAPTURE"
-                },
+                text = if (isCapturing) "CAPTURING\nPHOTO..." else "HOLD TO\nCAPTURE",
                 fontSize = 28.sp,
                 fontWeight = FontWeight.Black,
                 color = if (isCapturing) Color.Black else Color.White,
                 textAlign = TextAlign.Center,
-                letterSpacing = 1.sp
+                letterSpacing = 1.sp,
+                lineHeight = 32.sp
             )
         }
     }
 }
 
-// ==================== VIBRATION PATTERNS ====================
+// ==================== PREVIEW STATES ====================
 
-private enum class VibrationPattern(val timings: LongArray, val amplitudes: IntArray) {
-    START_LISTENING(
-        timings = longArrayOf(0, 50),
-        amplitudes = intArrayOf(0, 120)
-    ),
-    STOP_LISTENING(
-        timings = longArrayOf(0, 30),
-        amplitudes = intArrayOf(0, 80)
-    ),
-    LONG_PRESS(
-        timings = longArrayOf(0, 100, 50, 100),
-        amplitudes = intArrayOf(0, 150, 0, 150)
-    ),
-    ACTION_CONFIRM(
-        timings = longArrayOf(0, 30),
-        amplitudes = intArrayOf(0, 80)
-    )
+@Preview(showBackground = true, name = "Ready State - Connected")
+@Composable
+fun PreviewAccessibleReadyConnected() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = false,
+            isListening = false,
+            isProcessing = false,
+            sttState = SttState.Idle,
+            appState = AppState.Idle,
+            isStreaming = false,
+            imageBytes = null,
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
 }
 
-private fun vibrate(context: Context, pattern: VibrationPattern) {
-    val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
+@Preview(showBackground = true, name = "Ready State - Disconnected")
+@Composable
+fun PreviewAccessibleReadyDisconnected() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = false,
+            isFlashOn = false,
+            isListening = false,
+            isProcessing = false,
+            sttState = SttState.Idle,
+            appState = AppState.Idle,
+            isStreaming = false,
+            imageBytes = null,
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
 
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-        val effect = VibrationEffect.createWaveform(pattern.timings, pattern.amplitudes, -1)
-        vibrator.vibrate(effect)
-    } else {
-        @Suppress("DEPRECATION")
-        vibrator.vibrate(pattern.timings, -1)
+@Preview(showBackground = true, name = "Listening State")
+@Composable
+fun PreviewAccessibleListening() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = false,
+            isListening = true,
+            isProcessing = false,
+            sttState = SttState.Listening,
+            appState = AppState.Listening,
+            isStreaming = false,
+            imageBytes = null,
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Processing State")
+@Composable
+fun PreviewAccessibleProcessing() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = false,
+            isListening = false,
+            isProcessing = true,
+            sttState = SttState.Idle,
+            appState = AppState.Processing,
+            isStreaming = true,
+            imageBytes = null,
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "With Transcription Result")
+@Composable
+fun PreviewAccessibleWithTranscription() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = false,
+            isListening = false,
+            isProcessing = false,
+            sttState = SttState.Result("Take a picture of this document"),
+            appState = AppState.Idle,
+            isStreaming = false,
+            imageBytes = null,
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Capturing Photo")
+@Composable
+fun PreviewAccessibleCapturing() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = true,
+            isListening = false,
+            isProcessing = false,
+            sttState = SttState.Idle,
+            appState = AppState.Capturing("Capturing\nphoto"),
+            isStreaming = false,
+            imageBytes = null,
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Image Captured")
+@Composable
+fun PreviewAccessibleImageCaptured() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        // Simulate image bytes with a non-null value
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = false,
+            isListening = false,
+            isProcessing = false,
+            sttState = SttState.Idle,
+            appState = AppState.Idle,
+            isStreaming = false,
+            imageBytes = byteArrayOf(0x1, 0x2, 0x3), // Dummy bytes for preview
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "All Features Active")
+@Composable
+fun PreviewAccessibleAllActive() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = true,
+            isListening = false,
+            isProcessing = true,
+            sttState = SttState.Result("What can you see in this image?"),
+            appState = AppState.Processing,
+            isStreaming = true,
+            imageBytes = byteArrayOf(0x1, 0x2, 0x3),
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Error State")
+@Composable
+fun PreviewAccessibleError() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        AccessibleUserContent(
+            isConnected = true,
+            isFlashOn = false,
+            isListening = false,
+            isProcessing = false,
+            sttState = SttState.Error("Failed to recognize speech"),
+            appState = AppState.Error("Connection lost"),
+            isStreaming = false,
+            imageBytes = null,
+            onMicPress = {},
+            onMicRelease = {},
+            onCameraTap = {}
+        )
+    }
+}
+
+// ==================== CAPTURED IMAGE DIALOG PREVIEW ====================
+
+/**
+ * Creates a simple test image for preview purposes
+ */
+private fun createTestImageBytes(): ByteArray {
+    // Create a simple 400x300 bitmap with a gradient-like pattern
+    val width = 400
+    val height = 300
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val paint = Paint().apply {
+        isAntiAlias = true
+    }
+    
+    // Draw a gradient-like pattern
+    for (x in 0 until width) {
+        for (y in 0 until height) {
+            val r = (x * 255 / width).toInt()
+            val g = (y * 255 / height).toInt()
+            val b = 128
+            val color = android.graphics.Color.rgb(r, g, b)
+            bitmap.setPixel(x, y, color)
+        }
+    }
+    
+    // Add some text-like pattern in the center
+    paint.color = android.graphics.Color.WHITE
+    paint.textSize = 60f
+    paint.textAlign = Paint.Align.CENTER
+    canvas.drawText("TEST IMAGE", width / 2f, height / 2f, paint)
+    canvas.drawText("Preview", width / 2f, height / 2f + 80f, paint)
+    
+    // Convert to JPEG bytes
+    val outputStream = ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, 90, outputStream)
+    return outputStream.toByteArray()
+}
+
+@Preview(showBackground = true, name = "Captured Image Dialog")
+@Composable
+fun PreviewCapturedImageDialog() {
+    MaterialTheme(
+        colorScheme = lightColorScheme(),
+        typography = Typography
+    ) {
+        // Create test image bytes
+        val testImageBytes = remember { createTestImageBytes() }
+        
+        CapturedImageDialog(
+            imageBytes = testImageBytes,
+            showDialog = true,
+            onDismiss = {}
+        )
     }
 }

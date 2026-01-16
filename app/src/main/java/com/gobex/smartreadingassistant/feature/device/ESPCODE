@@ -1,0 +1,466 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+#include <string.h>
+
+// Check if Bluetooth is available
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to enable it
+#endif
+
+// ======================= PIN DEFINITIONS =======================
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+// Flash LED Pin (adjust based on your hardware)
+#define FLASH_LED_PIN      4  // GPIO4 is common for ESP32-CAM flash
+
+// ======================= BLE SETTINGS (Nordic UART Service) =======================
+#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define RX_CHARACTERISTIC   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E" // App writes here
+#define TX_CHARACTERISTIC   "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" // ESP32 notifies here
+#define WIFI_TIMEOUT_MS 6000  // 6 seconds before restart
+unsigned long wifiDisconnectedTime = 0;
+bool wifiWasConnected = false;
+BLEServer* pServer = NULL;
+BLECharacteristic* pTxCharacteristic = NULL;
+BLECharacteristic* pRxCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+// ======================= MEMORY SAFE VARIABLES =======================
+char ssid_buf[33] = {0};
+char pass_buf[65] = {0};
+volatile bool credentialsReady = false;
+bool wifiConnected = false;
+bool cameraInitialized = false;
+
+WebServer server(80);
+
+// ======================= LOGGING HELPERS =======================
+void log(const char* message) {
+  Serial.print(message);
+}
+
+void logln(const char* message) {
+  Serial.println(message);
+}
+
+void logStr(const String& message) {
+  Serial.print(message);
+}
+
+void loglnStr(const String& message) {
+  Serial.println(message);
+}
+
+// ======================= FLASH CONTROL =======================
+void setupFlash() {
+  pinMode(FLASH_LED_PIN, OUTPUT);
+  digitalWrite(FLASH_LED_PIN, LOW);
+  logln("Flash LED initialized");
+}
+
+void setFlash(bool state) {
+  digitalWrite(FLASH_LED_PIN, state ? HIGH : LOW);
+  Serial.print("Flash: ");
+  Serial.println(state ? "ON" : "OFF");
+}
+
+// ======================= CAMERA SETUP =======================
+void setupCamera() {
+  logln("Initializing camera...");
+
+  // Keep camera marked as NOT ready during entire setup
+  cameraInitialized = false;
+
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 10000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+
+  config.frame_size = FRAMESIZE_SVGA;
+  config.jpeg_quality = 15;
+  config.fb_count = 1;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    char buf[50];
+    sprintf(buf, "Camera init failed: 0x%x", err);
+    logln(buf);
+    cameraInitialized = false;
+    return;
+  }
+
+  logln("Warming up camera sensor...");
+
+  // Warm-up: Capture and IMMEDIATELY discard frames
+  for(int i = 0; i < 3; i++) {  // 3 frames is better than 2
+    camera_fb_t * fb = esp_camera_fb_get();
+    if(fb) {
+      // Immediately return without using the data at all
+      esp_camera_fb_return(fb);
+      logln("Warm-up frame discarded");
+    } else {
+      logln("Warm-up frame capture failed");
+    }
+    delay(100);  // Small delay between warm-up captures
+  }
+
+  logln("Camera warm-up complete");
+
+  // ONLY NOW is camera ready for actual use
+  cameraInitialized = true;
+  logln("Camera initialized successfully!");
+}
+
+// ======================= HTTP HANDLERS =======================
+void handleCapture() {
+  if (!cameraInitialized) {
+    server.send(503, "text/plain", "Camera not initialized");
+    return;
+  }
+
+  WiFi.setSleep(false);
+
+  camera_fb_t * fb = esp_camera_fb_get();
+  if(!fb) {
+    logln("Camera capture failed");
+    server.send(500, "text/plain", "Camera capture failed");
+    return;
+  }
+
+  char buf[50];
+  sprintf(buf, "Captured: %d bytes", fb->len);
+  logln(buf);
+
+  WiFiClient client = server.client();
+  client.write("HTTP/1.1 200 OK\r\n");
+  client.write("Content-Type: image/jpeg\r\n");
+  client.write("Content-Disposition: inline; filename=capture.jpg\r\n");
+  client.write("Access-Control-Allow-Origin: *\r\n");
+  client.write("Content-Length: ");
+  client.print(fb->len);
+  client.write("\r\n\r\n");
+  client.write(fb->buf, fb->len);
+
+  esp_camera_fb_return(fb);
+}
+
+// NEW: Control endpoint for flash and other devices (matches Android API)
+void handleControl() {
+  if (!server.hasArg("var") || !server.hasArg("val")) {
+    server.send(400, "text/plain", "Missing var or val parameter");
+    return;
+  }
+
+  String variable = server.arg("var");
+  int value = server.arg("val").toInt();
+
+  Serial.print("Control request - Variable: ");
+  Serial.print(variable);
+  Serial.print(", Value: ");
+  Serial.println(value);
+
+  if (variable == "flash") {
+    setFlash(value == 1);
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Unknown variable");
+  }
+}
+
+void handleStatus() {
+  String status = cameraInitialized ? "READY" : "CAMERA_NOT_INITIALIZED";
+  server.send(200, "text/plain", status);
+}
+void handlePing() {
+  // Ultra-lightweight response for health checks
+  server.send(200, "text/plain", "PONG");
+}
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><body>";
+  html += "<h1>SmartGlasses Camera</h1>";
+  html += "<p>WiFi: Connected</p>";
+  html += "<p>Camera: " + String(cameraInitialized ? "Ready" : "Not Initialized") + "</p>";
+  html += "<p><a href='/capture'>Capture Image</a></p>";
+  html += "<p><a href='/status'>Status</a></p>";
+  html += "<p><a href='/control?var=flash&val=1'>Flash ON</a></p>";
+  html += "<p><a href='/control?var=flash&val=0'>Flash OFF</a></p>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+// ======================= BLE CALLBACKS =======================
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      logln("BLE device connected");
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      logln("BLE device disconnected");
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+        String tempRxValue = pCharacteristic->getValue();
+        const char* rawData = tempRxValue.c_str();
+        int len = tempRxValue.length();
+
+        if (len > 0) {
+            const char* commaPtr = strchr(rawData, ',');
+
+            if (commaPtr != NULL) {
+                size_t ssidLen = commaPtr - rawData;
+                const char* passPtr = commaPtr + 1;
+                size_t passLen = len - ssidLen - 1;
+
+                if (ssidLen < sizeof(ssid_buf) && passLen < sizeof(pass_buf)) {
+                    strncpy(ssid_buf, rawData, ssidLen);
+                    ssid_buf[ssidLen] = '\0';
+
+                    strncpy(pass_buf, passPtr, passLen);
+                    pass_buf[passLen] = '\0';
+
+                    credentialsReady = true;
+                    logln("Credentials received via BLE");
+                }
+            }
+        }
+    }
+};
+
+void setupBLE() {
+  logln("Starting BLE...");
+  BLEDevice::init("SmartGlasses");
+
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pRxCharacteristic = pService->createCharacteristic(
+                      RX_CHARACTERISTIC,
+                      BLECharacteristic::PROPERTY_WRITE
+                    );
+  pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+  pTxCharacteristic = pService->createCharacteristic(
+                        TX_CHARACTERISTIC,
+                        BLECharacteristic::PROPERTY_NOTIFY
+                      );
+  pTxCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+
+  BLEDevice::startAdvertising();
+  logln("BLE Ready - Device: SmartGlasses");
+  logln("Format: SSID,PASSWORD");
+}
+
+// ======================= WATCHDOG FUNCTION =======================
+void checkWiFiWatchdog() {
+  wl_status_t status = WiFi.status();
+
+  if (wifiConnected) {
+    // We WERE connected, now check if we still are
+    if (status != WL_CONNECTED) {
+      // Connection lost!
+      if (wifiDisconnectedTime == 0) {
+        // First time noticing disconnection
+        wifiDisconnectedTime = millis();
+        logln("⚠️  WiFi connection lost! Starting watchdog timer...");
+      } else {
+        // Check how long we've been disconnected
+        unsigned long disconnectedDuration = millis() - wifiDisconnectedTime;
+
+        if (disconnectedDuration >= WIFI_TIMEOUT_MS) {
+          // Timeout exceeded - restart!
+          Serial.println("\n❌ WiFi connection lost for too long!");
+          Serial.println("🔄 Restarting ESP32 to restore connectivity...\n");
+          delay(1000);  // Give serial time to flush
+          ESP.restart();
+        } else {
+          // Still within timeout, log progress
+          if (disconnectedDuration % 3000 == 0) {  // Log every 3 seconds
+            Serial.print("⏳ Disconnected for ");
+            Serial.print(disconnectedDuration / 1000);
+            Serial.print("s / ");
+            Serial.print(WIFI_TIMEOUT_MS / 1000);
+            Serial.println("s");
+          }
+        }
+      }
+    } else {
+      // Connection restored!
+      if (wifiDisconnectedTime != 0) {
+        logln("✅ WiFi connection restored!");
+        wifiDisconnectedTime = 0;  // Reset timer
+      }
+    }
+  }
+}
+
+
+// ======================= MAIN SETUP =======================
+void setup() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
+  Serial.begin(115200);
+  delay(1000);
+
+  logln("\n=== SmartGlasses v4.1 ===");
+  logln("Bluetooth Serial: SmartGlasses-Debug");
+  logln("BLE UART: SmartGlasses");
+  logln("IMPORTANT: Set Partition Scheme to 'Huge APP (3MB No OTA)'");
+
+  // Initialize flash LED
+  setupFlash();
+
+  // Initialize BLE
+  setupBLE();
+
+  logln("Ready for WiFi credentials!");
+}
+
+void loop() {
+  if (credentialsReady) {
+    credentialsReady = false;
+
+    if (!wifiConnected) {
+      Serial.print("Connecting to: ");
+      Serial.println(ssid_buf);
+
+      Serial.println("Starting WiFi...");
+      WiFi.mode(WIFI_STA);
+      WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Max power
+      WiFi.setSleep(false);  // No power saving
+      WiFi.begin(ssid_buf, pass_buf);
+
+      int retries = 0;
+      while (WiFi.status() != WL_CONNECTED && retries < 30) {
+        delay(500);
+        Serial.print(".");
+        retries++;
+      }
+      Serial.println("");
+
+      if (WiFi.status() == WL_CONNECTED) {
+        wifiConnected = true;
+        String ipAddr = WiFi.localIP().toString();
+
+        // LOG CONNECTION SUCCESS
+        Serial.println("\n=== WiFi Connected Successfully ===");
+        Serial.print("IP Address: ");
+        Serial.println(ipAddr);
+        Serial.print("SSID: ");
+        Serial.println(ssid_buf);
+        Serial.println("====================================\n");
+
+        // Send IP via BLE
+        if (deviceConnected && pTxCharacteristic != NULL) {
+          String msg = "IP:" + ipAddr;
+
+          Serial.print("Sending IP via BLE: ");
+          Serial.println(msg);
+
+          pTxCharacteristic->setValue(msg.c_str());
+          pTxCharacteristic->notify();
+
+          Serial.println("BLE notification sent!");
+
+          delay(1000);
+        } else {
+          Serial.println("WARNING: BLE not connected, cannot send IP!");
+        }
+
+        // Shut down BLE to free RAM
+        logln("Shutting down BLE to free memory...");
+        BLEDevice::deinit(true);
+        delay(500);
+
+        // Initialize camera
+        setupCamera();
+
+        // Start Web Server
+        if (cameraInitialized) {
+          server.on("/", handleRoot);
+          server.on("/capture", handleCapture);
+          server.on("/status", handleStatus);
+          server.on("/control", handleControl);  // NEW: Control endpoint
+          server.on("/ping", handlePing);
+          server.begin();
+
+          Serial.println("\n=== Web Server Started ===");
+          Serial.print("Access camera at: http://");
+          Serial.println(ipAddr);
+          Serial.println("Endpoints:");
+          Serial.println("  - /");
+          Serial.println("  - /capture");
+          Serial.println("  - /status");
+          Serial.println("  - /control?var=flash&val=1");
+          Serial.println("==========================\n");
+        }
+      } else {
+        Serial.println("WiFi Failed! Wrong Password?");
+        delay(1000); // Give user time to see the serial message
+        ESP.restart(); // This reboots the chip and brings BLE back up
+      }
+    }
+  }
+
+  // Handle web requests
+  if (wifiConnected && WiFi.status() == WL_CONNECTED) {
+    server.handleClient();
+  }
+
+  checkWiFiWatchdog();
+  delay(10);
+}

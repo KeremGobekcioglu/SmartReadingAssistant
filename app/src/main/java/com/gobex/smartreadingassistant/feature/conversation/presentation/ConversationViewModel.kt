@@ -97,9 +97,17 @@ class ConversationViewModel @Inject constructor(
     )
 
     init {
-        loadHistory()
+//        loadHistory()
+        Log.d("VIEWMODAL","ACCESSIBLE MODE : ${_state.value.isAccessibilityMode}")
         observeSttWithCommands()
         startHeartbeat()
+        observeConnectionStateChanges()
+    }
+    // Inside ViewModel
+    fun checkAndAnnounceBluetoothStatus() {
+        if (!connectionManager.isBluetoothEnabled.value) {
+            announceAction("Bluetooth is currently off. Please enable it to connect your glasses.")
+        }
     }
     fun refreshBluetoothState() {
         connectionManager.refreshBluetoothState()
@@ -191,7 +199,8 @@ class ConversationViewModel @Inject constructor(
             it.copy(
                 isStreaming = true,
                 currentText = "Capturing photo...",
-                currentImageUri = null  // ✅ Clear old URI when taking new photo
+//                currentImageUri = null , // ✅ Clear old URI when taking new photo
+                isConnectScreen = false
             )
         }
 
@@ -211,10 +220,17 @@ class ConversationViewModel @Inject constructor(
             delay(2500)
         }
 
-        result.onFailure {
-            announceState(AppState.Error("Capture failed: ${it.message}"))
-            _state.update { it.copy(isStreaming = false, currentText = "") }
-            _uiEffect.send(ConversationEffect.ShowError("Capture Failed: ${it.message}"))
+        result.onFailure { error ->
+            // 3. Failure! We set isStreaming to false,
+            // but because we never nullified the bytes, the "old" image remains visible.
+            _state.update {
+                it.copy(
+                    isStreaming = false,
+                    currentText = ""
+                )
+            }
+            announceState(AppState.Error("Capture failed: ${error.message}"))
+            _uiEffect.send(ConversationEffect.ShowError("Capture Failed: ${error.message}"))
         }
     }
 
@@ -327,7 +343,7 @@ class ConversationViewModel @Inject constructor(
                         } else {
                             Log.d("VIEWMODEL", "⚠️ No URI received from repository")
                         }
-
+                        Log.d("LLM_STREAM", "✅ Stream Complete. Full Response: ${result.fullMessage.text}")
                         _state.update { state ->
                             val updatedList = state.messages.toMutableList()
                             updatedList.add(result.fullMessage)
@@ -343,7 +359,9 @@ class ConversationViewModel @Inject constructor(
                         _state.update { state ->
                             state.copy(currentText = state.currentText + result.text)
                         }
+                        Log.d("LLM_STREAM", "📦 Chunk received: ${result.text}")
                         speechBuffer.append(result.text)
+
                         if (result.text.contains(" ") || result.text.contains("\n")) {
                             val wordToSpeak = speechBuffer.toString()
                             if (wordToSpeak.isNotBlank()) {
@@ -351,6 +369,7 @@ class ConversationViewModel @Inject constructor(
                                 speechBuffer.clear()
                             }
                         }
+
                     }
 
                     is StreamResult.Error -> {
@@ -413,7 +432,7 @@ class ConversationViewModel @Inject constructor(
         val currentState = _state.value
 
         // Don't announce if disabled
-        if (!currentState.isVoiceAnnouncementsEnabled) return
+        if (!currentState.isVoiceAnnouncementsEnabled && !currentState.isConnectScreen) return
 
         // Don't announce same state twice
         if (currentState.lastAnnouncedState == newState) return
@@ -442,7 +461,7 @@ class ConversationViewModel @Inject constructor(
      * Announces a custom action message
      */
     fun announceAction(message: String, withHaptic: Boolean = true) {
-        if (!_state.value.isVoiceAnnouncementsEnabled) return
+        if (!_state.value.isVoiceAnnouncementsEnabled && !_state.value.isConnectScreen) return
 
         viewModelScope.launch {
             _uiEffect.send(ConversationEffect.AnnounceAction(message, withHaptic))
@@ -450,7 +469,14 @@ class ConversationViewModel @Inject constructor(
 
         ttsManager.speak(message)
     }
-
+    fun isConnectScreen()
+    {
+        _state.update { it.copy(isConnectScreen = true) }
+    }
+    private fun notConnectScreen()
+    {
+        _state.update { it.copy(isConnectScreen = false) }
+    }
     /**
      * Start monitoring connection state and announce changes
      */
@@ -465,13 +491,102 @@ class ConversationViewModel @Inject constructor(
             announceState(appState)
         }
     }
+    private var reconnectionJob: Job? = null
 
+
+    private fun handleReconnection() {
+        Log.d("VIEWMODAL","TRYING TO RECONNECT")
+        // If we are already trying to connect, don't start another job
+        if (connectionManager.state.value is DeviceConnectionManager.ConnectionState.Connecting) return
+
+        reconnectionJob = viewModelScope.launch {
+            announceAction("Connection lost. Trying to reconnect automatically.")
+
+            // Just call it ONCE.
+            // The Manager will now handle the 6-second hardware restart loop internally.
+            connectToSmartGlasses()
+
+            // Optional: Monitor the state to give voice feedback
+            connectionManager.state.collect { state ->
+                when (state) {
+                    is DeviceConnectionManager.ConnectionState.Connected -> {
+                        announceAction("Reconnected successfully.")
+                        reconnectionJob?.cancel()
+                    }
+                    is DeviceConnectionManager.ConnectionState.Error -> {
+                        // Only announce error if it's a final failure
+                        announceAction("Still trying to find your glasses.")
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+    private fun observeConnectionStateChanges() = viewModelScope.launch {
+        var previousState: DeviceConnectionManager.ConnectionState? = null
+        
+        connectionManager.state.collect { currentState ->
+            // Only announce if state actually changed
+            if (previousState != currentState) {
+                val newAppState = when (currentState) {
+                    is DeviceConnectionManager.ConnectionState.Disconnected -> AppState.Disconnected
+                    is DeviceConnectionManager.ConnectionState.Connecting -> AppState.Connecting
+                    is DeviceConnectionManager.ConnectionState.Connected -> AppState.Connected(currentState.ip)
+                    is DeviceConnectionManager.ConnectionState.Error -> AppState.Error(currentState.message)
+                }
+                _state.update { it.copy(currentAppState = newAppState) }
+                Log.d("CONNECTION_STATE", "State changed: ${previousState} -> ${currentState}")
+                
+                when (currentState) {
+                    is DeviceConnectionManager.ConnectionState.Disconnected -> {
+                        // Only announce if we were previously connected (not on initial load)
+                        if (previousState is DeviceConnectionManager.ConnectionState.Connected) {
+                            stopSpeaking()
+                            stopListening()
+                            announceState(AppState.Disconnected)
+                            // 2. Start Reconnection Flow
+                            handleReconnection()
+                            Log.d("CONNECTION_STATE", "⚠️ Connection lost - User notified")
+                        }
+                    }
+                    
+                    is DeviceConnectionManager.ConnectionState.Connecting -> {
+                        // Check if this is a reconnection attempt after connection loss
+                        if (previousState is DeviceConnectionManager.ConnectionState.Connected ||
+                            (previousState is DeviceConnectionManager.ConnectionState.Error && 
+                             currentState.step.contains("Reconnecting", ignoreCase = true))) {
+                            stopSpeaking()
+                            announceState(AppState.Connecting)
+                            Log.d("CONNECTION_STATE", "🔄 Reconnecting - User notified")
+                        }
+                    }
+                    
+                    is DeviceConnectionManager.ConnectionState.Connected -> {
+                        announceState(AppState.Connected(currentState.ip))
+                        Log.d("CONNECTION_STATE", "✅ Connected to ${currentState.ip} - User notified")
+                    }
+                    
+                    is DeviceConnectionManager.ConnectionState.Error -> {
+                        announceState(AppState.Error(currentState.message))
+                        Log.d("CONNECTION_STATE", "❌ Connection error: ${currentState.message}")
+                    }
+                }
+                
+                previousState = currentState
+            }
+        }
+    }
     private fun startHeartbeat() = viewModelScope.launch {
         while (true) {
             val currentState = connectionManager.state.value
             if (currentState is DeviceConnectionManager.ConnectionState.Connected) {
-                // Use the performHealthCheck we discussed earlier
-                connectionManager.performHealthCheck()
+                try {
+                    Log.d("HEARTBEAT", "🫀 Performing health check...")
+                    connectionManager.performHealthCheck()
+                } catch (e: Exception) {
+                    Log.e("HEARTBEAT", "❌ Health check failed with exception: ${e.message}", e)
+                    // Don't crash the heartbeat loop
+                }
             }
             delay(10000) // Check every 10 seconds
         }
@@ -483,13 +598,19 @@ class ConversationViewModel @Inject constructor(
         val command = VoiceCommandParser.parse(text)
 //        _state.update { it.copy(isImageDialogVisible = false) }
         Log.d("VIEWMODAL HANDLE VOICE COMMAND" , "STT TEXT IS THIS : $text")
+        notConnectScreen()
         when (command) {
             is VoiceCommand.CapturePhoto -> {
                 announceAction("Capturing photo")
 //                captureAndAnalyze()
                 captureImageOnly()
             }
+            is VoiceCommand.Stop ->
+            {
+                stopSpeaking()
 
+                announceAction("Alright. You have cut the answer")
+            }
             is VoiceCommand.Instructions ->
             {
 //                announceAction(
@@ -530,7 +651,26 @@ class ConversationViewModel @Inject constructor(
                 clearCapturedImage()
                 announceAction("Conversation cleared")
             }
+            is VoiceCommand.ReadAll -> {
+                val currentUri = _state.value.currentImageUri
+                val imageBytes = _state.value.capturedImageBytes
 
+                if (currentUri != null || imageBytes != null) {
+                    announceAction("Reading everything in the image.")
+
+                    // This is the "Magic Phrase" that forces the model to ignore brevity
+                    val forceOcrText = "TRANSCRIPTION MODE: Read every single piece of text in this image word-for-word. Do not summarize. If it is a log file, read all lines."
+
+                    if (currentUri != null) {
+                        sendPrompt(forceOcrText, null) // Reuse URI
+                    } else {
+                        val imageBase64 = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+                        sendPrompt(forceOcrText, imageBase64)
+                    }
+                } else {
+                    announceAction("Please take a photo first.")
+                }
+            }
             is VoiceCommand.SendToAI -> {
                 _state.update { it.copy(isImageDialogVisible = false) }
 
@@ -560,8 +700,7 @@ class ConversationViewModel @Inject constructor(
                     }
                     // Case 3: No image at all
                     else -> {
-                        Log.d("VoiceCommand", "💬 Text-only question")
-                        sendPrompt(command.text, null)
+                        announceAction("I cannot see anything yet. Please capture an image first so I can help you with that.")
                     }
                 }
             }

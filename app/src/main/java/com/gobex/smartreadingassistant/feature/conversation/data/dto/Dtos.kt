@@ -3,7 +3,9 @@ import com.google.gson.annotations.SerializedName
 
 // The top-level Request
 data class GeminiRequestDto(
-    @SerializedName("contents") val contents: List<ContentDto>
+    @SerializedName("contents") val contents: List<ContentDto>,
+    @SerializedName("systemInstruction") val systemInstruction: SystemInstructionDto? = null,
+    @SerializedName("generationConfig") val generationConfig: GenerationConfigDto? = null
 )
 
 // The top-level Response (Chunk)
@@ -11,7 +13,16 @@ data class GeminiResponseDto(
     @SerializedName("candidates") val candidates: List<CandidateDto>?,
     @SerializedName("usageMetadata") val usageMetadata: UsageMetadataDto?
 )
+data class SystemInstructionDto(
+    val parts: List<PartDto>
+)
 
+data class GenerationConfigDto(
+    val temperature: Double? = null,
+    val maxOutputTokens: Int? = null,
+    val topP: Double? = null,
+    val topK: Int? = null
+)
 data class CandidateDto(
     @SerializedName("content") val content: ContentDto?,
     @SerializedName("finishReason") val finishReason: String?
