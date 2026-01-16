@@ -8,7 +8,7 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include <string.h>
-
+#include "esp_heap_caps.h"
 // Check if Bluetooth is available
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to enable it
@@ -73,7 +73,13 @@ void logStr(const String& message) {
 void loglnStr(const String& message) {
   Serial.println(message);
 }
-
+void logMemory() {
+  Serial.print("Free heap: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.print(" bytes | Largest block: ");
+  Serial.print(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  Serial.println(" bytes");
+}
 // ======================= FLASH CONTROL =======================
 void setupFlash() {
   pinMode(FLASH_LED_PIN, OUTPUT);
@@ -90,8 +96,8 @@ void setFlash(bool state) {
 // ======================= CAMERA SETUP =======================
 void setupCamera() {
   logln("Initializing camera...");
+  logMemory();  // Check memory BEFORE init
   
-  // Keep camera marked as NOT ready during entire setup
   cameraInitialized = false;
   
   camera_config_t config;
@@ -113,43 +119,59 @@ void setupCamera() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;
+  config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   
-  config.frame_size = FRAMESIZE_SVGA; 
-  config.jpeg_quality = 15;
-  config.fb_count = 1;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+config.frame_size = FRAMESIZE_UXGA; 
+config.jpeg_quality = 10;           
+config.fb_count = 2;                 // You have the RAM, use 2 buffers!
+config.grab_mode = CAMERA_GRAB_LATEST; // This is the most important line
+config.fb_location = CAMERA_FB_IN_PSRAM; // Explicitly use that 3.7MB
+  
+  // Check if we have enough contiguous memory
+  size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (largestBlock < 35000) {  // Need ~33KB for DMA buffer + overhead
+    Serial.print("⚠️ WARNING: Insufficient contiguous memory! Largest block: ");
+    Serial.println(largestBlock);
+    Serial.println("🔄 Restarting to defragment heap...");
+    delay(2000);
+    ESP.restart();
+  }
   
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    char buf[50];
-    sprintf(buf, "Camera init failed: 0x%x", err);
-    logln(buf);
+    Serial.print("Camera init failed: 0x");
+    Serial.println(err, HEX);
+    
+    // If init fails, restart to defragment
+    if (err == 0xFFFFFFFF) {
+      logln("🔄 Memory fragmentation detected - restarting...");
+      delay(2000);
+      ESP.restart();
+    }
+    
     cameraInitialized = false;
     return;
   }
   
   logln("Warming up camera sensor...");
   
-  // Warm-up: Capture and IMMEDIATELY discard frames
-  for(int i = 0; i < 3; i++) {  // 3 frames is better than 2
+  // Warm-up: Capture and discard frames
+  for(int i = 0; i < 3; i++) {
     camera_fb_t * fb = esp_camera_fb_get();
     if(fb) {
-      // Immediately return without using the data at all
       esp_camera_fb_return(fb);
       logln("Warm-up frame discarded");
     } else {
       logln("Warm-up frame capture failed");
     }
-    delay(100);  // Small delay between warm-up captures
+    delay(100);
   }
   
   logln("Camera warm-up complete");
-  
-  // ONLY NOW is camera ready for actual use
   cameraInitialized = true;
   logln("Camera initialized successfully!");
+  logMemory();  // Check memory AFTER init
 }
 
 // ======================= HTTP HANDLERS =======================
@@ -160,17 +182,32 @@ void handleCapture() {
   }
   
   WiFi.setSleep(false);
+
+  // --- NEW FLUSH LOGIC START ---
+  // We loop twice because even with fb_count=1, the sensor and the 
+  // DMA controller can "hide" an old frame in the pipeline.
+  for(int i = 0; i < 2; i++) {
+    camera_fb_t * stale_fb = esp_camera_fb_get();
+    if(stale_fb) {
+      esp_camera_fb_return(stale_fb);
+      Serial.println("Stale frame cleared from pipeline");
+    }
+    delay(100); // Give the sensor time to start the next frame
+  }
+  // --- NEW FLUSH LOGIC END ---
   
+  // NOW capture the actual fresh frame
   camera_fb_t * fb = esp_camera_fb_get();
   if(!fb) {
-    logln("Camera capture failed");
+    logln("Camera capture failed - check if RAM is full");
+    logMemory();
     server.send(500, "text/plain", "Camera capture failed");
     return;
   }
   
-  char buf[50];
-  sprintf(buf, "Captured: %d bytes", fb->len);
-  logln(buf);
+  Serial.print("Fresh Capture Size: ");
+  Serial.print(fb->len);
+  Serial.println(" bytes");
   
   WiFiClient client = server.client();
   client.write("HTTP/1.1 200 OK\r\n");
@@ -360,7 +397,7 @@ void setup() {
   logln("Bluetooth Serial: SmartGlasses-Debug");
   logln("BLE UART: SmartGlasses");
   logln("IMPORTANT: Set Partition Scheme to 'Huge APP (3MB No OTA)'");
-  
+  logMemory();
   // Initialize flash LED
   setupFlash();
   
