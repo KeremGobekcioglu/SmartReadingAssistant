@@ -107,7 +107,7 @@ Three layers:
 
 - Requires internet for Gemini API (no offline fallback)
 - Best results at 10–20cm from target, perpendicular angle, moderate lighting
-- Single image context per session (no multi-image comparison)
+- Single image context per session
 - Prototype powered externally; battery integration not yet implemented
 - No autofocus on OV2640
 
