@@ -5,9 +5,11 @@ import android.os.Build
 import android.util.Log
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.BluetoothSearching
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.SettingsBluetooth
@@ -198,16 +200,6 @@ fun ConnectScreen(
                         )
 
                         // Secondary Task
-//                    LargeAccessibilityButton(
-//                        text = "Standard Chat",
-//                        icon = Icons.Default.Chat,
-//                        backgroundColor = Color.DarkGray,
-//                        textColor = Color.White,
-//                        onClick = {
-//                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
-//                            onNavigateToChat()
-//                        }
-//                    )
                     } else {
                         // Connect Button
                         LargeAccessibilityButton(
@@ -220,6 +212,16 @@ fun ConnectScreen(
                                 viewModel.connectToSmartGlasses()
                             },
                             isBluetoothEnabled
+                        )
+                        LargeAccessibilityButton(
+                            text = "Standard Chat",
+                            icon = Icons.Default.Chat,
+                            backgroundColor = Color.DarkGray,
+                            textColor = Color.White,
+                            onClick = {
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                                onNavigateToChat()
+                            }
                         )
                     }
                 }

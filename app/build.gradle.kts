@@ -125,4 +125,5 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.room.testing) // For Room testing
     implementation(libs.logging.interceptor.v4110)
+    debugImplementation (libs.leakcanary.android)
 }

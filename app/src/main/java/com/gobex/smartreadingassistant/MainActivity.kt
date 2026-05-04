@@ -26,15 +26,15 @@ class MainActivity : ComponentActivity() {
 
     var onHardwareKeyEvent: ((KeyEvent) -> Boolean)? = null
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // 1. Check if a Composable (like HardwareKeyHandler) wants this key
-        val consumedByCompose = onHardwareKeyEvent?.invoke(event) ?: false
-
-        // 2. If it was a Volume key and our app handled it, return true to block the System Volume UI
-        if (consumedByCompose) return true
-
-        return super.dispatchKeyEvent(event)
-    }
+//    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+//        // 1. Check if a Composable (like HardwareKeyHandler) wants this key
+//        val consumedByCompose = onHardwareKeyEvent?.invoke(event) ?: false
+//
+//        // 2. If it was a Volume key and our app handled it, return true to block the System Volume UI
+//        if (consumedByCompose) return true
+//
+//        return super.dispatchKeyEvent(event)
+//    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,8 +55,11 @@ class MainActivity : ComponentActivity() {
 
                             ConnectScreen(
                                 viewModel = viewModel,
-                                onNavigateToChat = { navController.navigate(Route.Chat) },
-                                onNavigateToAccessibleChat = { navController.navigate(Route.AccessibleChat)}
+                                onNavigateToChat = { navController.navigate(Route.AccessibleChat) },
+                                onNavigateToAccessibleChat = {
+                                    viewModel.enableAccessibilityMode()
+                                    navController.navigate(Route.AccessibleChat)
+                                }
                             )
                         }
 
@@ -77,7 +80,6 @@ class MainActivity : ComponentActivity() {
                                 navController.getBackStackEntry(Route.Connect)
                             }
                             val viewModel = hiltViewModel<ConversationViewModel>(parentEntry)
-                            viewModel.enableAccessibilityMode()
                             AccessibleUserScreen(
                                 viewModel = viewModel,
                                 onNavigateBack = { navController.popBackStack() }

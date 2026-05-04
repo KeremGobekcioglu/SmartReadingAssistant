@@ -194,43 +194,45 @@ class ConversationViewModel @Inject constructor(
     //                                  HARDWARE CAPTURE
     // ====================================================================================
     fun captureImageOnly() = viewModelScope.launch {
-        announceState(AppState.Capturing("Capturing photo"))
-        _state.update {
-            it.copy(
-                isStreaming = true,
-                currentText = "Capturing photo...",
+        if (_state.value.isAccessibilityMode) {
+            announceState(AppState.Capturing("Capturing photo"))
+            _state.update {
+                it.copy(
+                    isStreaming = true,
+                    currentText = "Capturing photo...",
 //                currentImageUri = null , // ✅ Clear old URI when taking new photo
-                isConnectScreen = false
-            )
-        }
-
-        val result = deviceRepository.captureImage()
-
-        result.onSuccess { imageBytes ->
-            _state.update {
-                it.copy(
-                    capturedImageBytes = imageBytes,
-                    isStreaming = false,
-                    isImageDialogVisible = true,
-                    currentText = "",
-                    currentImageUri = null  // ✅ Reset URI for new image
+                    isConnectScreen = false
                 )
             }
-            announceAction("Photo captured. What would you like to know about it?")
-            delay(2500)
-        }
 
-        result.onFailure { error ->
-            // 3. Failure! We set isStreaming to false,
-            // but because we never nullified the bytes, the "old" image remains visible.
-            _state.update {
-                it.copy(
-                    isStreaming = false,
-                    currentText = ""
-                )
+            val result = deviceRepository.captureImage()
+
+            result.onSuccess { imageBytes ->
+                _state.update {
+                    it.copy(
+                        capturedImageBytes = imageBytes,
+                        isStreaming = false,
+                        isImageDialogVisible = true,
+                        currentText = "",
+                        currentImageUri = null  // ✅ Reset URI for new image
+                    )
+                }
+                announceAction("Photo captured. What would you like to know about it?")
+                delay(2500)
             }
-            announceState(AppState.Error("Capture failed: ${error.message}"))
-            _uiEffect.send(ConversationEffect.ShowError("Capture Failed: ${error.message}"))
+
+            result.onFailure { error ->
+                // 3. Failure! We set isStreaming to false,
+                // but because we never nullified the bytes, the "old" image remains visible.
+                _state.update {
+                    it.copy(
+                        isStreaming = false,
+                        currentText = ""
+                    )
+                }
+                announceState(AppState.Error("Capture failed: ${error.message}"))
+                _uiEffect.send(ConversationEffect.ShowError("Capture Failed: ${error.message}"))
+            }
         }
     }
 
